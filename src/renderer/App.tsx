@@ -24,6 +24,7 @@ declare global {
     api: {
       call: (name: string, ...args: unknown[]) => Promise<any>;
       onState: (cb: (s: AppState) => void) => void;
+      onLink: (cb: (up: boolean) => void) => void;
     };
   }
 }
@@ -47,15 +48,28 @@ export function App() {
   // null until the first state arrives; then whether the first-run walkthrough is showing.
   const [setup, setSetup] = useState<boolean | null>(null);
 
+  // Clicks that are still waiting for the tracker to answer; shown as "Working…" once one takes a moment.
+  const [waiting, setWaiting] = useState(0);
+  const [slow, setSlow] = useState(false);
+  const [down, setDown] = useState(false);
   const call = async (name: string, ...args: unknown[]) => {
+    setWaiting((n) => n + 1);
     try {
       return await window.api.call(name, ...args);
     } catch (e) {
       setLocalError(String((e as Error).message ?? e));
+    } finally {
+      setWaiting((n) => n - 1);
     }
   };
+  useEffect(() => {
+    if (!waiting) return setSlow(false);
+    const t = setTimeout(() => setSlow(true), 400);
+    return () => clearTimeout(t);
+  }, [waiting]);
 
   useEffect(() => {
+    window.api.onLink((up) => setDown(!up));
     window.api.onState(setState);
     void window.api.call('getState').then(setState);
   }, []);
@@ -184,9 +198,14 @@ export function App() {
         </div>
       </header>
 
+      {down && (
+        <div className="bar err">
+          <span><i className="spin" /> The tracker has stopped answering. Trying to reconnect… If this stays, start it again from its shortcut.</span>
+        </div>
+      )}
       {state.busy && (
         <div className="bar">
-          {state.busy}
+          <span><i className="spin" /> {state.busy}</span>
           {state.busy.startsWith('Matching') && <button onClick={() => call('cancelAutoMatch')}>Stop</button>}
         </div>
       )}
@@ -251,6 +270,11 @@ export function App() {
         )}
       </main>
 
+      {!down && !state.busy && (slow || !!state.background?.length) && (
+        <div className="working" role="status">
+          <i className="spin" /> {slow ? 'Working…' : `In the background: ${state.background!.join(', ')}`}
+        </div>
+      )}
       {open && <Detail key={open.id} s={open} all={everything} dead={state.deadSites} call={call} close={() => setOpenId(null)} open={setOpenId} />}
       {modal === 'add' && <Add call={call} close={() => setModal(null)} />}
       {modal === 'pending' && <Pending state={state} call={call} close={() => setModal(null)} />}

@@ -213,6 +213,8 @@ export interface AppState {
   lastSync?: number;
   lastScan?: number;
   busy?: string;
+  /** Quiet jobs running right now (history check, site check, covers…), for the "working" marker. */
+  background?: string[];
   error?: string;
 }
 

@@ -176,6 +176,7 @@ function state(): AppState {
     lastSync: cfg.lastSync,
     lastScan: cfg.lastScan,
     busy,
+    background: [...jobs.keys()],
     error: lastError,
   };
 }
@@ -199,6 +200,18 @@ function push() {
   if (!clients.size) return;
   const data = `data: ${JSON.stringify(state())}\n\n`;
   for (const c of clients) c.write(data);
+}
+/** Quiet background jobs in progress, by name, so the screen can show that something is happening. */
+const jobs = new Map<string, number>();
+function track<T>(label: string, work: Promise<T>): Promise<T> {
+  jobs.set(label, (jobs.get(label) ?? 0) + 1);
+  push();
+  return work.finally(() => {
+    const left = (jobs.get(label) ?? 1) - 1;
+    if (left > 0) jobs.set(label, left);
+    else jobs.delete(label);
+    push();
+  });
 }
 function setBusy(text?: string) {
   busy = text;
@@ -1428,7 +1441,7 @@ const handlers: Record<string, (...a: any[]) => unknown> = {
   backup: () => makeBackup(),
   restore: (b: Backup) => restoreBackup(b),
   findElsewhere: (id: string) => findElsewhere(String(id)),
-  checkSites: () => checkSites(true),
+  checkSites: () => void track('checking which sites are still up', checkSites(true)).catch(report),
   openDoc(name: string) {
     const file = path.join(__dirname, '..', 'docs', path.basename(String(name)));
     if (fs.existsSync(file)) spawn('explorer.exe', [file], { detached: true, stdio: 'ignore' }).unref();
@@ -1483,12 +1496,12 @@ const REC_REFRESH_MS = 7 * 24 * 60 * 60 * 1000;
 function background() {
   if (!store) return;
   seedSites();
-  void backfillAdult().then(backfillCountry).catch(report);
-  void fetchImages().catch(report);
-  void checkSites().catch(report);
-  void fixNovelMismatches().catch(report).then(() => refreshChapters()).catch(report);
-  if (getToken() && store.lib.settings.syncEnabled) void sync(true).catch(report);
-  if (cfg.historyPath && store.lib.settings.trackedSites.length) void scan(false, true).catch(report);
+  void track('filling in series details', backfillAdult().then(backfillCountry)).catch(report);
+  void track('downloading covers', fetchImages()).catch(report);
+  void track('checking which sites are still up', checkSites()).catch(report);
+  void track('checking chapter counts', fixNovelMismatches().catch(report).then(() => refreshChapters())).catch(report);
+  if (getToken() && store.lib.settings.syncEnabled) void track('syncing with AniList', sync(true)).catch(report);
+  if (cfg.historyPath && store.lib.settings.trackedSites.length) void track('checking browser history', scan(false, true)).catch(report);
 }
 
 /**
@@ -1499,7 +1512,7 @@ function background() {
  */
 function schedule() {
   setInterval(() => {
-    if (store && cfg.historyPath && store.lib.settings.trackedSites.length) void scan(false, true).catch(report);
+    if (store && cfg.historyPath && store.lib.settings.trackedSites.length) void track('checking browser history', scan(false, true)).catch(report);
   }, 5 * 60 * 1000);
   setInterval(() => {
     if (store && getToken() && store.lib.settings.syncEnabled) void sync(true).catch(report);
@@ -1507,7 +1520,7 @@ function schedule() {
   setInterval(() => {
     if (!store) return;
     void refreshChapters().catch(report);
-    void checkSites().catch(report);
+    void track('checking which sites are still up', checkSites()).catch(report);
     const fetched = loadRecs()?.fetchedAt;
     if (fetched && Date.now() - fetched > REC_REFRESH_MS) void fetchRecommendations().catch(report);
   }, 6 * 60 * 60 * 1000);
@@ -1586,8 +1599,9 @@ async function onRequest(req: http.IncomingMessage, res: http.ServerResponse) {
 /** Started by Windows at sign-in: run quietly, without opening a browser window. */
 const BACKGROUND = process.argv.includes('--background');
 
-function openBrowser(force = false) {
-  if (process.env.MANGA_TRACKER_NO_OPEN || (BACKGROUND && !force)) return;
+/** Opens the tracker's window. Returns how long (ms) the opening takes, so a caller about to exit can wait for it. */
+function openBrowser(force = false): number {
+  if (process.env.MANGA_TRACKER_NO_OPEN || (BACKGROUND && !force)) return 0;
   // Prefer Chrome, in its own app window: Chrome has to be running on this PC anyway for the
   // phone's history and tabs to sync down. Set MANGA_TRACKER_BROWSER=default to use the default browser.
   const chrome = [process.env.PROGRAMFILES, process.env['PROGRAMFILES(X86)'], process.env.LOCALAPPDATA]
@@ -1614,9 +1628,10 @@ function openBrowser(force = false) {
     setTimeout(() => {
       spawn(chrome, [...args, ORIGINS[0]], { detached: true, stdio: 'ignore' }).unref();
     }, 2500);
-    return;
+    return 2500;
   }
   spawn('cmd', ['/c', 'start', '', ORIGINS[0]], { detached: true, stdio: 'ignore' }).unref();
+  return 0;
 }
 
 /** Errors logged since the tracker was last started, newest last; for the note shown at start-up. */
@@ -1676,8 +1691,10 @@ function main() {
   server.on('error', (err: NodeJS.ErrnoException) => {
     if (err.code === 'EADDRINUSE') {
       console.log('Manga Tracker is already running. Opening it in your browser.');
-      openBrowser();
-      setTimeout(() => process.exit(0), 500);
+      // Already running in the background (it starts with Windows): just show its window.
+      // Leaving before the window has been opened would look like a crash.
+      const wait = openBrowser(true);
+      setTimeout(() => process.exit(0), wait + 1500);
     } else throw err;
   });
   server.listen(PORT, '127.0.0.1', () => {

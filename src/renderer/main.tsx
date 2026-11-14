@@ -5,6 +5,7 @@ import './styles.css';
 
 // Talks to the local Manga Tracker server this page was loaded from.
 const listeners = new Set<(s: unknown) => void>();
+const linkListeners = new Set<(up: boolean) => void>();
 let events: EventSource | undefined;
 window.api = {
   async call(name, ...args) {
@@ -29,11 +30,17 @@ window.api = {
     }
     return out.result;
   },
+  onLink(cb) {
+    linkListeners.add(cb);
+  },
   onState(cb) {
     listeners.add(cb as (s: unknown) => void);
     if (!events) {
       events = new EventSource('/api/events');
       events.onmessage = (e) => listeners.forEach((l) => l(JSON.parse(e.data)));
+      // The browser keeps retrying by itself; these only say whether the tracker is answering.
+      events.onerror = () => linkListeners.forEach((l) => l(false));
+      events.onopen = () => linkListeners.forEach((l) => l(true));
     }
   },
 };
