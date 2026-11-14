@@ -19,7 +19,13 @@ const BROWSERS: [string, string][] = [
   ['Chrome', 'Google/Chrome/User Data'],
   ['Brave', 'BraveSoftware/Brave-Browser/User Data'],
   ['Edge', 'Microsoft/Edge/User Data'],
+  ['Vivaldi', 'Vivaldi/User Data'],
+  ['Arc', 'Packages/TheBrowserCompany.Arc_ttt1ap7aakyb4/LocalCache/Local/Arc/User Data'],
 ];
+
+/** Firefox keeps history in places.sqlite, with times in microseconds since 1970. */
+export const isFirefox = (historyPath: string) => /places\.sqlite$/i.test(historyPath);
+const UNIX_TO_CHROME = 11644473600000000;
 
 export function listProfiles(): BrowserProfile[] {
   const local = process.env.LOCALAPPDATA;
@@ -42,6 +48,25 @@ export function listProfiles(): BrowserProfile[] {
       if (fs.existsSync(file)) out.push({ label: account ? `${name} — ${account} (${dir})` : `${name} — ${dir}`, path: file });
     }
   }
+  const roaming = process.env.APPDATA;
+  if (roaming) {
+    for (const [name, rel] of [['Opera', 'Opera Software/Opera Stable'], ['Opera GX', 'Opera Software/Opera GX Stable']]) {
+      for (const sub of ['Default', '']) {
+        const file = path.join(roaming, rel, sub, 'History');
+        if (fs.existsSync(file)) {
+          out.push({ label: `${name} (beta)`, path: file });
+          break;
+        }
+      }
+    }
+    const fx = path.join(roaming, 'Mozilla/Firefox/Profiles');
+    if (fs.existsSync(fx)) {
+      for (const dir of fs.readdirSync(fx)) {
+        const file = path.join(fx, dir, 'places.sqlite');
+        if (fs.existsSync(file)) out.push({ label: `Firefox — ${dir.replace(/^[^.]+\./, '')} (beta)`, path: file });
+      }
+    }
+  }
   return out;
 }
 
@@ -51,15 +76,23 @@ export function listProfiles(): BrowserProfile[] {
  */
 export async function readVisits(historyPath: string, domains: string[], afterId: number): Promise<Visit[]> {
   if (!domains.length) return [];
-  const tmp = path.join(os.tmpdir(), `manga-tracker-history-${process.pid}.sqlite`);
+  const tmp = path.join(os.tmpdir(), `manga-tracker-history-${process.pid}-${Math.random().toString(36).slice(2, 8)}.sqlite`);
   fs.copyFileSync(historyPath, tmp);
   try {
     const SQL = await initSqlJs();
-    const db = new SQL.Database(fs.readFileSync(tmp));
+    const bytes = fs.readFileSync(tmp);
+    const firefox = isFirefox(historyPath);
+    // Firefox writes in "WAL" mode, which this reader can't open. Marking the copy as a plain
+    // database reads everything Firefox has already folded into the main file (it does so every few minutes).
+    if (bytes[18] === 2 && bytes[19] === 2) bytes[18] = bytes[19] = 1;
+    const db = new SQL.Database(bytes);
     try {
       const like = domains.map(() => 'u.url LIKE ?').join(' OR ');
-      const stmt = db.prepare(
-        `SELECT v.id AS id, u.url AS url, u.title AS title, v.visit_time AS time
+      const stmt = db.prepare(firefox
+        ? `SELECT v.id AS id, u.url AS url, u.title AS title, v.visit_date + ${UNIX_TO_CHROME} AS time
+           FROM moz_historyvisits v JOIN moz_places u ON u.id = v.place_id
+           WHERE v.id > ? AND (${like}) ORDER BY v.id`
+        : `SELECT v.id AS id, u.url AS url, u.title AS title, v.visit_time AS time
          FROM visits v JOIN urls u ON u.id = v.url
          WHERE v.id > ? AND (${like}) ORDER BY v.id`,
       );
@@ -100,6 +133,31 @@ export function readBookmarks(historyPath: string, domains: string[]): Visit[] {
   const roots = JSON.parse(fs.readFileSync(file, 'utf8')).roots as Record<string, object>;
   for (const r of Object.values(roots)) if (r && typeof r === 'object') walk(r, false);
   return out;
+}
+
+/**
+ * A text file other apps add page links to: the way in for browsers whose history can't be read
+ * from this PC, such as Safari on an iPhone (a share-sheet Shortcut appends to it; see docs).
+ * One page per line: the link, optionally followed by a tab and the page title, optionally
+ * preceded by a date and a tab. Returns the pages after byte `offset` and the new offset.
+ */
+export function readInbox(file: string, offset: number, now = Date.now()): { visits: Visit[]; offset: number } {
+  if (!fs.existsSync(file)) return { visits: [], offset: 0 };
+  const buf = fs.readFileSync(file);
+  if (buf.length < offset) offset = 0; // the file was cleared or replaced
+  // Only whole lines: a line still being written is left for the next read.
+  const end = buf.lastIndexOf(10) + 1;
+  if (end <= offset) return { visits: [], offset };
+  const visits: Visit[] = [];
+  for (const line of buf.subarray(offset, end).toString('utf8').split(/\r?\n/)) {
+    const parts = line.replace(/^\uFEFF/, '').split('\t').map((p) => p.trim()).filter(Boolean);
+    const at = parts.findIndex((p) => /^https?:\/\//i.test(p));
+    if (at < 0) continue;
+    const when = at > 0 ? Date.parse(parts[0]) : NaN;
+    const ms = Number.isFinite(when) && when <= now ? when : now;
+    visits.push({ kind: 'history', url: parts[at].split(/\s/)[0], title: parts[at + 1]?.slice(0, 300), time: ms * 1000 + UNIX_TO_CHROME });
+  }
+  return { visits, offset: end };
 }
 
 export function onTracked(url: string, domains: string[]): boolean {

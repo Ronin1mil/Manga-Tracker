@@ -32,7 +32,10 @@ export function App() {
   const [state, setState] = useState<AppState | null>(null);
   const [tab, setTab] = useState<Status | 'ALL' | 'BOOKMARKS' | 'FORYOU'>('CURRENT');
   const [query, setQuery] = useState('');
-  const [sort, setSort] = useState<'read' | 'updated' | 'title' | 'percent' | 'unread'>('read');
+  const [sort, setSortRaw] = useState<SortKey>(() => saved('sort', 'read') as SortKey);
+  const [reversed, setReversedRaw] = useState(() => saved('reversed', '') === '1');
+  const setSort = (v: SortKey) => { setSortRaw(v); setReversedRaw(false); remember('sort', v); remember('reversed', ''); };
+  const setReversed = (v: boolean) => { setReversedRaw(v); remember('reversed', v ? '1' : ''); };
   const [kind, setKind] = useState<'all' | 'manga' | 'novel'>('all');
   const [openId, setOpenId] = useState<string | null>(null);
   const [modal, setModal] = useState<Modal>(null);
@@ -93,13 +96,15 @@ export function App() {
       .filter((s) => (tab === 'BOOKMARKS') === (s.origin === 'bookmark'))
       .filter((s) => tab === 'ALL' || tab === 'BOOKMARKS' || s.status === tab || (tab === 'CURRENT' && s.status === 'REPEATING'))
       .filter((s) => !q || [s.titles.english, s.titles.romaji, s.titles.native, s.siteTitle, ...(s.altTitles ?? [])].some((t) => t?.toLowerCase().includes(q)))
-      .sort((a, b) =>
-        sort === 'title' ? displayTitle(a).localeCompare(displayTitle(b))
-        : sort === 'unread' ? unreadRank(a) - unreadRank(b) || (b.lastReadAt ?? 0) - (a.lastReadAt ?? 0)
-        : sort === 'percent' ? (percentRead(b) ?? -1) - (percentRead(a) ?? -1) || b.updatedAt - a.updatedAt
-        : sort === 'read' ? (b.lastReadAt ?? 0) - (a.lastReadAt ?? 0) || b.updatedAt - a.updatedAt
-        : b.updatedAt - a.updatedAt);
-  }, [series, tab, query, sort]);
+      .sort((a, b) => {
+        // Series the sort has no value for (never read, no chapter count) stay at the bottom either way.
+        const va = SORTS[sort].value(a);
+        const vb = SORTS[sort].value(b);
+        if (va === undefined || vb === undefined) return va === vb ? b.updatedAt - a.updatedAt : va === undefined ? 1 : -1;
+        const c = typeof va === 'string' ? va.localeCompare(vb as string) : (va as number) - (vb as number);
+        return (SORTS[sort].descending !== reversed ? -c : c) || b.updatedAt - a.updatedAt;
+      });
+  }, [series, tab, query, sort, reversed]);
 
   if (!state) return null;
   const error = localError ?? state.error;
@@ -148,13 +153,17 @@ export function App() {
             <option value="manga">Manga only ({everything.length - novelCount})</option>
             <option value="novel">Novels only ({novelCount})</option>
           </select>
-          <select value={sort} onChange={(e) => setSort(e.target.value as typeof sort)}>
-            <option value="read">Last read</option>
-            <option value="updated">Last updated</option>
-            <option value="title">Title</option>
-            <option value="percent">Percent read</option>
-            <option value="unread">New chapters to read</option>
+          <select value={sort} title="Sort by" onChange={(e) => setSort(e.target.value as SortKey)}>
+            {(Object.keys(SORTS) as SortKey[]).map((k) => <option key={k} value={k}>{SORTS[k].label}</option>)}
           </select>
+          <button
+            className="dir"
+            aria-pressed={reversed}
+            title={`Showing ${SORTS[sort].order[reversed ? 1 : 0]}. Click to reverse.`}
+            onClick={() => setReversed(!reversed)}
+          >
+            {SORTS[sort].descending !== reversed ? '↓' : '↑'} {SORTS[sort].order[reversed ? 1 : 0]}
+          </button>
           <button
             className={lib.settings.showNsfw ? 'nsfw on' : 'nsfw'}
             aria-pressed={!!lib.settings.showNsfw}
@@ -251,10 +260,35 @@ type Call = (name: string, ...args: unknown[]) => Promise<any>;
 const SITES_HINT = KNOWN_SITES.map((k) => k.domain).join('\n');
 
 /** "today", "3d ago", "2w ago", "5mo ago", "2y ago". */
-/** Series with chapters waiting come first, the ones you are closest to caught up on at the top. */
-function unreadRank(s: ViewSeries) {
-  const n = unreadChapters(s);
-  return n ? n : n === 0 ? 1e6 : 2e6;
+type SortKey = 'read' | 'updated' | 'added' | 'title' | 'percent' | 'unread' | 'progress' | 'score';
+
+/** Every sort: what it compares, which way it runs first, and what each direction is called. */
+const SORTS: Record<SortKey, { label: string; value: (s: ViewSeries) => number | string | undefined; descending: boolean; order: [string, string] }> = {
+  read: { label: 'Last read', value: (s) => s.lastReadAt, descending: true, order: ['newest first', 'oldest first'] },
+  updated: { label: 'Last updated', value: (s) => s.updatedAt, descending: true, order: ['newest first', 'oldest first'] },
+  added: { label: 'Date added', value: (s) => s.addedAt, descending: true, order: ['newest first', 'oldest first'] },
+  title: { label: 'Title', value: (s) => displayTitle(s).toLowerCase(), descending: false, order: ['A to Z', 'Z to A'] },
+  percent: { label: 'Percent read', value: (s) => percentRead(s), descending: true, order: ['most first', 'least first'] },
+  // Caught-up series (0 new) have nothing to read, so they count as "no value" and sink.
+  unread: { label: 'New chapters to read', value: (s) => unreadChapters(s) || undefined, descending: false, order: ['fewest first', 'most first'] },
+  progress: { label: 'Chapters read', value: (s) => s.progress, descending: true, order: ['most first', 'fewest first'] },
+  score: { label: 'Your score', value: (s) => s.score || undefined, descending: true, order: ['highest first', 'lowest first'] },
+};
+
+function saved(key: string, fallback: string): string {
+  try {
+    const v = localStorage.getItem(`mt-${key}`);
+    return key === 'sort' ? (v && v in SORTS ? v : fallback) : v ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+function remember(key: string, value: string) {
+  try {
+    localStorage.setItem(`mt-${key}`, value);
+  } catch {
+    /* private window: just not remembered */
+  }
 }
 
 /** "3 new": chapters that are out and not read yet, for series you are following. */
@@ -622,9 +656,8 @@ function Detail({ s, all, call, close, open }: { s: ViewSeries; all: ViewSeries[
             <MergePicker
               s={s}
               all={all}
-              onPick={async (other) => {
-                if (!confirm(`Merge "${displayTitle(other)}" into "${displayTitle(s)}"? Their sites, the higher chapter and your notes are combined into one entry.`)) return;
-                const kept = await call('mergeSeries', s.id, other.id);
+              onMerge={async (other, opts) => {
+                const kept = await call('mergeSeries', s.id, other.id, opts);
                 setMerging(false);
                 if (kept && kept !== s.id) open(kept);
               }}
@@ -638,8 +671,18 @@ function Detail({ s, all, call, close, open }: { s: ViewSeries; all: ViewSeries[
 }
 
 /** Pick the other library entry that is the same series. Likely duplicates (shared words in the name) are listed first. */
-function MergePicker({ s, all, onPick }: { s: ViewSeries; all: ViewSeries[]; onPick: (other: ViewSeries) => void }) {
+type MergeOpts = { detailsFrom: string; progress: number; status: Status };
+
+function MergePicker({ s, all, onMerge }: { s: ViewSeries; all: ViewSeries[]; onMerge: (other: ViewSeries, opts: MergeOpts) => void }) {
   const [q, setQ] = useState('');
+  const [other, setOther] = useState<ViewSeries | null>(null);
+  const [opts, setOpts] = useState<MergeOpts | null>(null);
+  const onPick = (o: ViewSeries) => {
+    setOther(o);
+    // Start from the sensible answers: the entry with real details, the higher chapter, the status of the one you actually read.
+    const better = (s.needsDetails || !s.anilistId) && o.anilistId ? o : s;
+    setOpts({ detailsFrom: better.id, progress: Math.max(s.progress, o.progress), status: s.origin === 'bookmark' && !o.origin ? o.status : s.status });
+  };
   const words = (t: string) => new Set(t.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((w) => w.length > 2));
   const mine = words([displayTitle(s), s.siteTitle ?? '', s.titles.romaji ?? ''].join(' '));
   const list = useMemo(() => {
@@ -657,6 +700,38 @@ function MergePicker({ s, all, onPick }: { s: ViewSeries; all: ViewSeries[]; onP
       .sort((a, b) => b.like - a.like || displayTitle(a.o).localeCompare(displayTitle(b.o)))
       .slice(0, 8);
   }, [all, s.id, q]);
+  if (other && opts) {
+    const pair = [s, other];
+    const differentSeries = !!s.anilistId && !!other.anilistId && s.anilistId !== other.anilistId;
+    const choice = <T,>(label: string, values: T[], current: T, show: (v: T, i: number) => string, set: (v: T) => void) => (
+      <div className="mergeChoice">
+        <span className="muted">{label}</span>
+        {values[0] === values[1]
+          ? <span>{show(values[0], 0)} <small className="muted">(same on both)</small></span>
+          : values.map((v, i) => (
+            <label key={i} className={current === v ? 'opt on' : 'opt'}>
+              <input type="radio" checked={current === v} onChange={() => set(v)} /> {show(v, i)}
+            </label>
+          ))}
+      </div>
+    );
+    return (
+      <div className="merge">
+        <b>Choose what to keep</b>
+        {differentSeries && <div className="warn">These are two different series on AniList, so they can't be merged.</div>}
+        {choice('Name, cover and details', pair.map((x) => x.id), opts.detailsFrom,
+          (_, i) => `${displayTitle(pair[i])}${pair[i].needsDetails ? ' (no details)' : pair[i].anilistId ? ' (AniList)' : ''}`,
+          (v) => setOpts({ ...opts, detailsFrom: v }))}
+        {choice('Chapter', pair.map((x) => x.progress), opts.progress, (v) => `Ch. ${v}`, (v) => setOpts({ ...opts, progress: v }))}
+        {choice('Status', pair.map((x) => x.status), opts.status, (v, i) => `${STATUS_LABEL[v]}${pair[i].origin === 'bookmark' ? ' (bookmark only)' : ''}`, (v) => setOpts({ ...opts, status: v }))}
+        <div className="muted">Always combined: the sites you read it on, notes, your thumb and score, and reading stats.</div>
+        <div className="row">
+          <button className="primary" disabled={differentSeries} onClick={() => onMerge(other, opts)}>Merge into one entry</button>
+          <button onClick={() => { setOther(null); setOpts(null); }}>Back</button>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="merge">
       <input autoFocus value={q} placeholder="Type the name of the other entry" onChange={(e) => setQ(e.target.value)} />
@@ -929,6 +1004,8 @@ function Settings({ state, call, error, close, runSetup }: { state: AppState; ca
   useEffect(() => { void call('profiles').then((p) => setProfiles(p ?? [])); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const saveSites = () => call('setSettings', { trackedSites: sites.split(/\s+/).filter(Boolean) });
   const [importMsg, setImportMsg] = useState('');
+  const extras = state.extraSources ?? [];
+  const [inbox, setInbox] = useState(state.inboxPath ?? '');
   // A page copied with Ctrl+A / Ctrl+C keeps its links in the clipboard's HTML form.
   const importHtml = async (html: string) => {
     const doc = new DOMParser().parseFromString(html, 'text/html');
@@ -1005,6 +1082,31 @@ function Settings({ state, call, error, close, runSetup }: { state: AppState; ca
       </div>
       {!state.historyPath && <p className="warn">Nothing is being read yet: "Browser history to read" above is Off. Pick your Chrome account there first.</p>}
       {state.busy && <p className="muted">{state.busy}</p>}
+      <label>Other browsers <span className="badge">beta</span></label>
+      <p className="muted">
+        Read these as well as the one above. A phone browser arrives through its PC version: reading in Edge, Brave or Firefox on your
+        phone shows up here once the same browser on this PC is signed in to sync history.
+      </p>
+      {profiles.filter((p) => p.path !== state.historyPath).length === 0
+        ? <p className="muted">No other browsers found on this PC.</p>
+        : profiles.filter((p) => p.path !== state.historyPath).map((p) => (
+          <label key={p.path} className="check">
+            <input
+              type="checkbox"
+              checked={extras.includes(p.path)}
+              onChange={(e) => call('setSources', { extraSources: e.target.checked ? [...extras, p.path] : extras.filter((x) => x !== p.path) })}
+            /> {p.label}
+          </label>
+        ))}
+      <label>Inbox file for Safari and anything else <span className="badge">beta</span></label>
+      <p className="muted">
+        Safari's history can't be read from Windows. Instead, a share-sheet Shortcut on the phone adds the page you're on to a text file
+        that syncs to this PC, and the tracker reads new lines from it. <a href="#" onClick={(e) => { e.preventDefault(); void call('openDoc', 'other-browsers.md'); }}>Step-by-step setup</a>.
+      </p>
+      <div className="row">
+        <input className="grow" value={inbox} placeholder="Full path of the synced text file, e.g. …\iCloudDrive\Shortcuts\manga-inbox.txt" onChange={(e) => setInbox(e.target.value)} />
+        <button disabled={inbox.trim() === (state.inboxPath ?? '')} onClick={() => call('setSources', { inboxPath: inbox })}>Save</button>
+      </div>
       {error && <p className="err">{error}</p>}
       <label>Import a site's own bookmark list (for example mangahub.io/user/bookmarks)</label>
       <div

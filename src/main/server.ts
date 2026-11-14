@@ -22,7 +22,7 @@ import * as mu from './mangaupdates';
 import { rank, weight, type RecFile } from './recommend';
 import { KNOWN_SITES, OLD_SITES, isNovelSite, knownSite } from '../shared/sites';
 import { bestMatch, norm, plausibleChapters, saysNovel, straighten, titleVariants } from './titles';
-import { bookmarksFile, listProfiles, onTracked, readBookmarks, readVisits, type Visit } from './chromeHistory';
+import { bookmarksFile, isFirefox, listProfiles, onTracked, readBookmarks, readInbox, readVisits, type Visit } from './chromeHistory';
 import { ReadingLog } from './readingLog';
 import { protect, unprotect } from './secret';
 import { Store } from './store';
@@ -41,6 +41,11 @@ interface Config {
   /** Size and change time of the History and Bookmarks files when they were last read. */
   historyStamp?: string;
   bookmarksStamp?: string;
+  /** Beta: more browser history files read alongside the main one, each with its own place marker. */
+  extraSources?: { path: string; lastVisitId?: number }[];
+  /** Beta: a text file other apps add page links to (see readInbox). */
+  inboxPath?: string;
+  inboxOffset?: number;
 }
 
 const PORT = Number(process.env.MANGA_TRACKER_PORT) || 47800;
@@ -152,6 +157,8 @@ function state(): AppState {
     viewerName: cfg.viewer?.name,
     clientId: cfg.clientId,
     historyPath: cfg.historyPath,
+    extraSources: (cfg.extraSources ?? []).map((x) => x.path),
+    inboxPath: cfg.inboxPath,
     autostart: isAutostart(),
     suggestedLibrary: store ? undefined : path.join(fs.existsSync('D:\\') ? 'D:\\' : path.join(os.homedir(), 'Documents'), 'MangaLibrary'),
     recommendations: store ? rank(store.lib.series, loadRecs(), store.lib.recDismissed ?? [], !!store.lib.settings.showNsfw).slice(0, 60) : [],
@@ -436,8 +443,9 @@ async function scan(full = false, quiet = false) {
   if (!domains.length) throw new Error('Add at least one tracked site in Settings first.');
   if (scanning) return;
   const rlog = readingLog();
-  const historyStamp = stamp(cfg.historyPath);
-  const bookmarksStamp = `${BOOKMARKS_VERSION}:${stamp(bookmarksFile(cfg.historyPath))}`;
+  const extras = (cfg.extraSources ?? []).filter((x) => x.path !== cfg.historyPath && fs.existsSync(x.path));
+  const historyStamp = [cfg.historyPath, ...extras.map((x) => x.path), ...(cfg.inboxPath ? [cfg.inboxPath] : [])].map(stamp).join('|');
+  const bookmarksStamp = `${BOOKMARKS_VERSION}:${[cfg.historyPath, ...extras.filter((x) => !isFirefox(x.path)).map((x) => x.path)].map((p) => stamp(bookmarksFile(p))).join('|')}`;
   const firstLog = !rlog.data.backfilled;
   if (quiet && !firstLog && historyStamp === cfg.historyStamp && bookmarksStamp === cfg.bookmarksStamp && Date.now() - (cfg.lastScan ?? 0) < FULL_CHECK_MS) return;
   scanning = true;
@@ -449,9 +457,33 @@ async function scan(full = false, quiet = false) {
     const afterId = full || firstLog ? 0 : cfg.lastVisitId ?? 0;
     const visits = await readVisits(cfg.historyPath, domains, afterId);
     cfg.lastVisitId = visits.reduce((m, v) => Math.max(m, v.id ?? 0), afterId);
+    // Beta: other browsers on this PC. One that can't be read is reported and skipped.
+    for (const x of extras) {
+      try {
+        const from = full || firstLog ? 0 : x.lastVisitId ?? 0;
+        const more = await readVisits(x.path, domains, from);
+        x.lastVisitId = more.reduce((m, v) => Math.max(m, v.id ?? 0), from);
+        visits.push(...more);
+        if (more.length) log(`scan: ${more.length} tracked pages from ${isFirefox(x.path) ? 'Firefox' : 'another browser'}`);
+      } catch (err) {
+        report(`Could not read an extra browser's history: ${(err as Error).message}`);
+      }
+    }
+    // Beta: links other apps dropped into the inbox file (Safari on a phone, through a Shortcut).
+    if (cfg.inboxPath) {
+      try {
+        const box = readInbox(cfg.inboxPath, full ? 0 : cfg.inboxOffset ?? 0);
+        cfg.inboxOffset = box.offset;
+        visits.push(...box.visits);
+        if (box.visits.length) log(`scan: ${box.visits.length} links from the inbox file`);
+      } catch (err) {
+        report(`Could not read the inbox file: ${(err as Error).message}`);
+      }
+    }
     visits.sort((a, b) => a.time - b.time); // oldest first, so each chapter is logged on the day it was first read
     if (afterId === 0 || bookmarksStamp !== cfg.bookmarksStamp) {
       const marks = readBookmarks(cfg.historyPath, [...domains, ...OLD_SITES]);
+      for (const x of extras) if (!isFirefox(x.path)) marks.push(...readBookmarks(x.path, [...domains, ...OLD_SITES]));
       visits.push(...marks);
       log(`bookmarks: ${marks.length} read from the browser (tracked sites, closed sites, and reading folders)`);
     }
@@ -1014,7 +1046,7 @@ const handlers: Record<string, (...a: any[]) => unknown> = {
     st.save();
   },
   /** Fold one entry into another: the same series that ended up in the library twice. */
-  mergeSeries(keepId: string, otherId: string) {
+  mergeSeries(keepId: string, otherId: string, opts: { detailsFrom?: string; progress?: number; status?: Status } = {}) {
     const st = need();
     let keep = st.get(keepId);
     let other = st.get(otherId);
@@ -1022,14 +1054,17 @@ const handlers: Record<string, (...a: any[]) => unknown> = {
     if (keep.anilistId && other.anilistId && keep.anilistId !== other.anilistId) {
       throw new Error('These are two different series on AniList, so they were not merged.');
     }
-    // Keep whichever entry has real details.
-    if ((keep.needsDetails || !keep.anilistId) && other.anilistId) [keep, other] = [other, keep];
-    const ahead = other.progress > keep.progress ? other : keep;
-    if (ahead === other) {
+    // The entry whose details (name, cover, AniList link) you chose is the one that stays;
+    // with no choice made, the one that has real details.
+    if (opts.detailsFrom === other.id || (!opts.detailsFrom && (keep.needsDetails || !keep.anilistId) && other.anilistId)) [keep, other] = [other, keep];
+    const wanted = Number.isFinite(opts.progress) && opts.progress! >= 0 ? opts.progress! : Math.max(keep.progress, other.progress);
+    const status = opts.status && ['CURRENT', 'PLANNING', 'COMPLETED', 'PAUSED', 'DROPPED', 'REPEATING'].includes(opts.status) ? opts.status : undefined;
+    // "Continue reading" should point at the site that is furthest along.
+    if (other.progress > keep.progress) {
       keep.lastUrl = other.lastUrl ?? keep.lastUrl;
       keep.readAt = other.readAt ?? keep.readAt;
-      st.setProgress(keep, other.progress, 'manual');
     }
+    st.setProgress(keep, wanted, 'manual');
     keep.lastUrl ??= other.lastUrl;
     keep.readAt ??= other.readAt;
     keep.lastReadAt = Math.max(keep.lastReadAt ?? 0, other.lastReadAt ?? 0) || undefined;
@@ -1044,6 +1079,7 @@ const handlers: Record<string, (...a: any[]) => unknown> = {
       delete keep.origin;
       keep.status = other.status;
     }
+    if (status) st.setStatus(keep, status, 'manual');
     for (const [k, v] of Object.entries(st.lib.siteMappings)) if (v === other.id) st.lib.siteMappings[k] = keep.id;
     readingLog().rename(`id:${other.id}`, `id:${keep.id}`);
     readingLog().save();
@@ -1097,6 +1133,24 @@ const handlers: Record<string, (...a: any[]) => unknown> = {
       setBusy('Downloading covers…');
       await fetchImages().finally(() => setBusy(undefined));
     }
+  },
+  /** Beta: which other browser history files to read as well, and the inbox file. */
+  setSources(patch: { extraSources?: string[]; inboxPath?: string }) {
+    if (Array.isArray(patch.extraSources)) {
+      const known = new Set(listProfiles().map((p) => p.path));
+      const old = cfg.extraSources ?? [];
+      cfg.extraSources = [...new Set(patch.extraSources)].filter((p) => known.has(p) && p !== cfg.historyPath).map((p) => old.find((o) => o.path === p) ?? { path: p });
+    }
+    if ('inboxPath' in patch) {
+      const p = patch.inboxPath?.trim().replace(/^"|"$/g, '') || undefined;
+      if (p && !path.isAbsolute(p)) throw new Error('Enter the full path of the inbox file, for example C:\\Users\\you\\iCloudDrive\\Shortcuts\\manga-inbox.txt.');
+      if (p !== cfg.inboxPath) cfg.inboxOffset = 0;
+      cfg.inboxPath = p;
+    }
+    cfg.historyStamp = undefined;
+    saveCfg();
+    push();
+    if (cfg.historyPath && store?.lib.settings.trackedSites.length) void scan(false, true).catch(report);
   },
   setConfig(patch: Pick<Config, 'clientId' | 'historyPath'>) {
     if ('historyPath' in patch && patch.historyPath !== cfg.historyPath) {
@@ -1164,6 +1218,10 @@ const handlers: Record<string, (...a: any[]) => unknown> = {
     return { links: visits.length, series, added: st.lib.pending.filter((p) => !before.has(p.key)).length };
   },
   exportCsv: () => need().toCsv(),
+  openDoc(name: string) {
+    const file = path.join(__dirname, '..', 'docs', path.basename(String(name)));
+    if (fs.existsSync(file)) spawn('explorer.exe', [file], { detached: true, stdio: 'ignore' }).unref();
+  },
   openFolder() {
     if (cfg.libraryPath) spawn('explorer.exe', [cfg.libraryPath], { detached: true, stdio: 'ignore' }).unref();
   },

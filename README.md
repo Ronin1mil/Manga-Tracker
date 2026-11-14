@@ -109,3 +109,9 @@ App settings (chosen library, history source, encrypted AniList token) are in `%
 - **New chapters:** a card shows "3 new" when chapters are out that you haven't read. Sort by "New chapters to read" to see the series you are closest to caught up on first. Counts for series you are reading are checked daily, the rest weekly.
 - **Merging duplicates:** open either entry, press **Merge…** and pick the other one. Their sites, the higher chapter, notes and reading stats are combined; the entry with details from a source is the one kept. Two entries that are different series on AniList are refused.
 - **Manga, manhwa, manhua:** the country a series comes from is recorded and shown, and recommendations use it to tell the three apart.
+
+## Other browsers (beta)
+
+Settings → **Other browsers** reads more browser history files on this PC (Edge, Brave, Vivaldi, Opera, Firefox) alongside the main one, which is also how reading in those browsers on a phone arrives. Safari on an iPhone goes through an inbox text file filled by a share-sheet Shortcut. Both are described in [docs/other-browsers.md](docs/other-browsers.md).
+
+Every sort has a direction button next to it, and merging two entries lets you choose whose details, chapter and status to keep.

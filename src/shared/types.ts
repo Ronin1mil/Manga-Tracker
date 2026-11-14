@@ -194,6 +194,10 @@ export interface AppState {
   /** How many series are being held back because NSFW is hidden. */
   hiddenNsfw: number;
   /** The tracker starts by itself, in the background, when you sign in to Windows. */
+  /** Beta: other browser history files read as well. */
+  extraSources?: string[];
+  /** Beta: text file other apps add page links to. */
+  inboxPath?: string;
   autostart: boolean;
   /** Offered on first run, before a library folder has been chosen. */
   suggestedLibrary?: string;
