@@ -1,2 +1,105 @@
-# Manga-Tracker
-This is an AI generated manga tracker that I needed and wanted to be uploaded in the off chance that I lose it.
+# Manga Tracker
+
+A local-first tracker for the manga you read in Chrome on your phone. It runs as a small Node server on this PC and opens in a Chrome window. Nothing is uploaded except optional AniList sync.
+
+## Run
+
+Double-click `Manga Tracker.cmd`. It builds on first run, opens Chrome on the profile being read, then opens the tracker window at `http://127.0.0.1:47800`. Close the console window to stop it.
+
+From a terminal:
+
+```
+npm install
+npm run build
+npm start
+npm test
+```
+
+Requires Node 20 or newer.
+
+## Start with Windows
+
+Settings → **Start with Windows** adds a per-user startup entry (no administrator rights needed) that runs the server with no window and without opening a browser. Open the tracker from `Manga Tracker.cmd` or `http://127.0.0.1:47800` whenever you want to look at it. Phone reading still only arrives while Chrome on this PC is running and syncing.
+
+What runs by itself, and how often:
+
+| Job | When |
+|---|---|
+| Look for new reading in the browser | Every 5 minutes, and skipped unless the browser's history or bookmarks file changed |
+| Match new series and download covers | Right after new series are found |
+| Send your changes to AniList | Immediately, ten changes per request |
+| Fetch your AniList list | Once an hour, or on Refresh |
+| Released-chapter counts | Each series once a week |
+| Recommendations | Once a week |
+
+The process runs at below-normal priority.
+
+## AniList
+
+Step-by-step instructions are in [docs/anilist-setup.md](docs/anilist-setup.md).
+
+## Bookmarks
+
+Browser bookmarks are read when they sit on a tracked site, on a known closed site (mangafarm, the old Asura and Flame Scans addresses and others, listed in `src/shared/sites.ts`), or inside any bookmark folder whose name contains manga, manhwa, manhua, webtoon, comic or novel. A bookmarked chapter becomes the chapter you are on. Series known only from bookmarks go to the Bookmarks tab and are not sent to AniList.
+
+## Reading stats
+
+The Stats button shows chapters per day, week and month. They are counted from the real date of each chapter page you opened, kept in `reading-log.json`; a chapter counts once. Chapters known only as a number (where you already were when a series was first imported, or your AniList list) are never counted, so years of earlier reading can't pile up on the day of the import. Chrome keeps about three months of history, so that is how far back the first chart reaches.
+
+## How reading is detected
+
+Chrome on this PC receives your phone's history and open tabs through Chrome sync. The tracker reads copies of three things in the chosen Chrome profile, and only entries on the sites you list under Tracked sites:
+
+- `History` — pages you opened (proof of reading)
+- `Sync Data/LevelDB` — tabs open on your other devices (the freshest signal; needed for sites that change chapter without loading a new page)
+- `Bookmarks` — a hint only; these go to the separate Bookmarks tab
+
+Chrome has to be running on this PC for phone data to arrive. A site's own bookmark list (for example mangahub.io/user/bookmarks) can be imported in Settings by copying the page and pasting it in.
+
+## How a detected series gets its details
+
+Sites name series loosely (cut-off titles, missing apostrophes, tags like "(Manhwa)", a different translation). Auto-match cleans the name up (`src/main/titles.ts`), then tries, in order:
+
+1. a series already in the library under any of its names;
+2. AniList;
+3. MangaDex, which lists many alternative names and often points back at the AniList entry;
+4. nothing found: the series is kept under the site's own name, marked "No details", and retried on later runs.
+
+A match is accepted only when a name is the same or very nearly the same and the chapter count is plausible. Each decision is written to `%APPDATA%\manga-tracker\log.txt`.
+
+## The library folder
+
+Everything you'd want in ten years is plain files in the folder you choose:
+
+| File | What it is |
+|---|---|
+| `library.json` | Every series: titles, metadata, status, chapter, notes, links |
+| `history.jsonl` | Append-only log of every progress change |
+| `covers/` | Cover and banner images |
+| `index.html` | A page showing the whole library; opens in any browser without this app |
+| `reading-log.json` | Which chapters were read on which day (for the stats) |
+| `recommendations.json` | Saved recommendation candidates |
+| `backups/` | The last ten copies of `library.json` |
+
+App settings (chosen library, history source, encrypted AniList token) are in `%APPDATA%\manga-tracker\config.json`.
+
+## Environment variables
+
+| Variable | Effect |
+|---|---|
+| `MANGA_TRACKER_PORT` | Port to serve on (default 47800) |
+| `MANGA_TRACKER_BROWSER=default` | Open in the default browser instead of Chrome |
+| `MANGA_TRACKER_NO_OPEN=1` | Don't open a browser |
+| `MANGA_TRACKER_USERDATA`, `MANGA_TRACKER_LIBRARY` | Override the settings folder and library folder |
+
+## Layout
+
+- `src/main/server.ts` — HTTP server, sync with AniList, detection pipeline
+- `src/main/chapterParser.ts` — turns a page URL into series and chapter (tested in `tests/`)
+- `src/main/chromeHistory.ts`, `src/main/syncData.ts` — read Chrome's history, bookmarks and synced device tabs
+- `src/main/store.ts`, `src/main/staticPage.ts` — the library folder
+- `src/main/readingLog.ts` — per-day reading log and the stats
+- `src/main/recommend.ts` — recommendation scoring
+- `src/main/mangadex.ts`, `src/main/mangaupdates.ts` — backup sources for details, novels and chapter counts
+- `src/shared/sites.ts` — the built-in list of reading sites
+- `src/renderer/` — the React interface

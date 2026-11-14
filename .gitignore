@@ -1,0 +1,21 @@
+node_modules/
+dist/
+dist-server/
+dist-electron/
+release/
+*.log
+
+# Personal data must never be committed
+.env
+.env.*
+config.json
+library.json
+reading-log.json
+recommendations.json
+backups/
+covers/
+*.sqlite
+*.db
+History
+Bookmarks
+.claude/

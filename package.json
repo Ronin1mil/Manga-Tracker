@@ -1,0 +1,29 @@
+{
+  "name": "manga-tracker",
+  "version": "0.1.0",
+  "description": "Local-first manga progress tracker with AniList sync and browser-history detection",
+  "private": true,
+  "scripts": {
+    "build": "tsc --noEmit && vite build && node scripts/build-main.mjs",
+    "start": "node dist-server/server.js",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "classic-level": "^3.0.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "sql.js": "^1.16.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/sql.js": "^1.4.11",
+    "@vitejs/plugin-react": "^6.3.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8",
+    "vitest": "^5.1.0"
+  }
+}
