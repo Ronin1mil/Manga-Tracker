@@ -196,6 +196,8 @@ export interface AppState {
   /** The tracker starts by itself, in the background, when you sign in to Windows. */
   /** Beta: other browser history files read as well. */
   extraSources?: string[];
+  /** Reading sites that have closed or moved; links on them no longer work. */
+  deadSites?: string[];
   /** Beta: text file other apps add page links to. */
   inboxPath?: string;
   autostart: boolean;
@@ -212,6 +214,27 @@ export interface AppState {
   lastScan?: number;
   busy?: string;
   error?: string;
+}
+
+/** Somewhere else to read a series whose site has closed. */
+export interface SiteOption {
+  site: string;
+  url: string;
+  /** found = checked, the series is there; guess = the usual link for that site, not checked; search = a web search. */
+  kind: 'found' | 'guess' | 'search';
+  note: string;
+}
+
+/** Everything the tracker knows, in one file, for moving to another PC or undoing a mistake. */
+export interface Backup {
+  app: 'manga-tracker-backup';
+  version: 1;
+  savedAt: string;
+  library: Library;
+  readingLog?: unknown;
+  /** history.jsonl as text. */
+  history?: string;
+  recommendations?: unknown;
 }
 
 export type PendingAction =

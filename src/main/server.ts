@@ -14,7 +14,10 @@ import {
   type SyncDevice,
   type SeriesMeta,
   type Status,
+  type Backup,
+  type SiteOption,
 } from '../shared/types';
+import { fill, hostOf, onDeadSite, searchUrl, siteTemplate, slugFor, type SiteTemplate } from '../shared/links';
 import * as al from './anilist';
 import { normalizeDomain, parseChapterUrl, parseSeriesUrl } from './chapterParser';
 import * as dex from './mangadex';
@@ -46,6 +49,9 @@ interface Config {
   /** Beta: a text file other apps add page links to (see readInbox). */
   inboxPath?: string;
   inboxOffset?: number;
+  /** Reading sites found closed or moved at the last check. */
+  deadSites?: string[];
+  sitesCheckedAt?: number;
 }
 
 const PORT = Number(process.env.MANGA_TRACKER_PORT) || 47800;
@@ -159,6 +165,7 @@ function state(): AppState {
     historyPath: cfg.historyPath,
     extraSources: (cfg.extraSources ?? []).map((x) => x.path),
     inboxPath: cfg.inboxPath,
+    deadSites: cfg.deadSites ?? [],
     autostart: isAutostart(),
     suggestedLibrary: store ? undefined : path.join(fs.existsSync('D:\\') ? 'D:\\' : path.join(os.homedir(), 'Documents'), 'MangaLibrary'),
     recommendations: store ? rank(store.lib.series, loadRecs(), store.lib.recDismissed ?? [], !!store.lib.settings.showNsfw).slice(0, 60) : [],
@@ -946,6 +953,206 @@ async function fixNovelMismatches() {
 
 /** Add the built-in reading sites to the tracked list once, and re-read history so past reading on them is picked up. */
 const SITES_VERSION = 1;
+// ---------- closed sites ----------
+
+const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36';
+const baseDomain = (h: string) => h.split('.').slice(-2).join('.');
+const splitKey = (k: string) => ({ domain: k.slice(0, k.indexOf('/')), slug: k.slice(k.indexOf('/') + 1) });
+
+/** Ask a site for a page. No status = it could not be reached at all. */
+async function probe(url: string, ms = 10000): Promise<{ status?: number; host?: string; path?: string }> {
+  try {
+    const r = await fetch(url, { headers: { 'User-Agent': BROWSER_UA, Accept: 'text/html,*/*' }, signal: AbortSignal.timeout(ms), redirect: 'follow' });
+    void r.body?.cancel();
+    const u = new URL(r.url);
+    return { status: r.status, host: u.hostname.toLowerCase().replace(/^www\./, ''), path: u.pathname.toLowerCase() };
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Once a day, see which of the sites your links point at are still there. A site counts as gone when it
+ * is on the built-in closed list, can't be reached, or sends you to a different or parked domain.
+ * A site you read on in the last two weeks is never marked, whatever the check says.
+ */
+async function checkSites(force = false) {
+  const st = need();
+  if (!force && cfg.sitesCheckedAt && Date.now() - cfg.sitesCheckedAt < DAY_MS) return;
+  const hosts = new Set<string>();
+  const recent = new Set<string>();
+  for (const s of st.lib.series) {
+    for (const u of [s.lastUrl, s.readAt]) {
+      const h = hostOf(u);
+      if (!h) continue;
+      hosts.add(h);
+      if (u === s.lastUrl && s.lastReadAt && Date.now() - s.lastReadAt < 14 * DAY_MS) recent.add(h);
+    }
+  }
+  // Offline, every site looks closed: only judge them when the internet is there.
+  if ((await probe('https://api.mangadex.org/ping')).status === undefined) return;
+  const dead: string[] = [];
+  await pool([...hosts], 8, async (h) => {
+    if (recent.has(h)) return;
+    if (OLD_SITES.some((d) => h === d || h.endsWith('.' + d))) {
+      dead.push(h);
+      return;
+    }
+    let r = await probe(`https://${h}/`);
+    if (r.status === undefined) r = await probe(`https://${h}/`);
+    if (r.status === undefined || /^ww\d+\./.test(r.host!)) {
+      dead.push(h);
+    } else if (baseDomain(r.host!) !== baseDomain(h)) {
+      // Moved to a new address: fine if an old chapter link is carried over, gone if it lands on the front page.
+      const sample = st.lib.series.find((s) => hostOf(s.lastUrl) === h)?.lastUrl;
+      const moved = sample ? await probe(sample) : {};
+      if (moved.status !== 200 || (moved.path ?? '/').length < 2) dead.push(h);
+    }
+  });
+  cfg.deadSites = dead.sort();
+  cfg.sitesCheckedAt = Date.now();
+  saveCfg();
+  log(`sites: ${hosts.size} checked, ${dead.length} closed or moved`);
+  push();
+}
+
+/**
+ * Other places to read a series: sites you already read on (the link is built the way that site
+ * builds its links, and checked where the site allows it), MangaDex, then web searches.
+ */
+async function findElsewhere(id: string): Promise<SiteOption[]> {
+  const st = need();
+  const s = st.get(id);
+  if (!s) return [];
+  const dead = cfg.deadSites ?? [];
+  const title = displayTitle(s);
+  const known = s.totalChapters ?? s.latestChapter;
+  // The next chapter, or the last one when you're caught up.
+  const chapter = Math.floor(s.progress) + (known && known <= s.progress ? 0 : 1);
+  const current = hostOf(s.lastUrl);
+  const mine = Object.entries(st.lib.siteMappings).filter(([, v]) => v === id).map(([k]) => splitKey(k));
+
+  // Sites you read on that are still up, most recently used first, each with how it builds links.
+  const sites = new Map<string, { at: number; tpl: SiteTemplate }>();
+  for (const [k, v] of Object.entries(st.lib.siteMappings)) {
+    const o = st.get(v);
+    const { domain, slug } = splitKey(k);
+    const h = hostOf(o?.lastUrl);
+    if (!o?.lastUrl || o.origin || !h || !(h === domain || h.endsWith('.' + domain)) || onDeadSite(o.lastUrl, dead)) continue;
+    if (domain === current || isNovelSite(domain) !== isNovel(s)) continue;
+    const tpl = siteTemplate(o.lastUrl, slug);
+    if (!tpl || (!tpl.chapter && !tpl.series)) continue;
+    const cur = sites.get(domain);
+    sites.set(domain, { at: Math.max(cur?.at ?? 0, o.lastReadAt ?? 0), tpl: cur?.tpl.chapter ? cur.tpl : tpl });
+  }
+  const ranked = [...sites.entries()].sort((a, b) => b[1].at - a[1].at).slice(0, 5);
+
+  const slugs = [...new Set([title, s.titles.english, s.siteTitle, s.titles.romaji].filter((t): t is string => !!t).map(slugFor).filter((x) => x.length > 1))].slice(0, 3);
+  const out: SiteOption[] = [];
+  await Promise.all(ranked.map(async ([domain, { tpl }]) => {
+    const link = (slug: string) => fill(tpl.chapter ?? tpl.series!, slug, chapter);
+    const what = tpl.chapter ? `chapter ${chapter}` : 'the series page';
+    const had = mine.find((m) => m.domain === domain);
+    if (had) {
+      out.push({ site: domain, url: link(had.slug), kind: 'found', note: `You have read it here before. Opens ${what}.` });
+      return;
+    }
+    let unsure: string | undefined;
+    for (const slug of slugs) {
+      // mangahub.io turns away anything that isn't a browser, but its cover server says whether it has the series.
+      const r = domain === 'mangahub.io'
+        ? await probe(`https://thumb.mghcdn.com/mn/${slug}.jpg`)
+        : await probe(fill(tpl.series ?? tpl.chapter!, slug, chapter));
+      const there = r.status === 200 && (domain === 'mangahub.io' || (baseDomain(r.host!) === baseDomain(domain) && r.path!.includes(slug)));
+      if (there) {
+        out.push({ site: domain, url: link(slug), kind: 'found', note: `The series is on this site. Opens ${what}.` });
+        return;
+      }
+      if (r.status !== 404 && r.status !== 410 && r.status !== 200) unsure ??= slug;
+    }
+    if (unsure) out.push({ site: domain, url: link(unsure), kind: 'guess', note: `The usual link for this site; it could not be checked. Opens ${what}.` });
+  }));
+
+  if (st.lib.settings.useMangadex !== false && !isNovel(s)) {
+    try {
+      const names = new Set(namesOf(s).filter((n): n is string => !!n).map(norm));
+      const dexId = s.mangadexId ?? (await dex.search(title)).find((h) => h.names.some((n) => names.has(norm(n))))?.meta.mangadexId;
+      if (dexId) {
+        const ch = await dex.chapterLink(dexId, chapter);
+        out.push({
+          site: 'mangadex.org',
+          url: ch ?? `https://mangadex.org/title/${dexId}`,
+          kind: 'found',
+          note: ch ? `The series is on MangaDex. Opens chapter ${chapter}.` : `The series is listed on MangaDex, but chapter ${chapter} is not there in English. Opens the series page.`,
+        });
+      }
+    } catch {
+      /* MangaDex unreachable: the other options still stand */
+    }
+  }
+
+  for (const [domain] of ranked.slice(0, 3)) {
+    if (out.some((o) => o.site === domain && o.kind === 'found')) continue;
+    out.push({ site: domain, url: searchUrl(title, chapter, domain), kind: 'search', note: `A Google search for chapter ${chapter} on ${domain} only.` });
+  }
+  out.push({ site: 'Google', url: searchUrl(title, chapter), kind: 'search', note: `A Google search for "${title}" chapter ${chapter}, on any site.` });
+  const order = { found: 0, guess: 1, search: 2 };
+  log(`find: ${out.filter((o) => o.kind === 'found').length} found, ${out.filter((o) => o.kind === 'guess').length} unchecked for one series`);
+  return out.sort((a, b) => order[a.kind] - order[b.kind]);
+}
+
+// ---------- backup ----------
+
+function readJson(file: string): unknown {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return undefined;
+  }
+}
+
+/** Everything in one object. The AniList login and this PC's browser settings are left out on purpose. */
+function makeBackup(): Backup {
+  const st = need();
+  return {
+    app: 'manga-tracker-backup',
+    version: 1,
+    savedAt: new Date().toISOString(),
+    library: st.lib,
+    readingLog: readJson(path.join(st.dir, 'reading-log.json')),
+    history: fs.existsSync(st.historyFile) ? fs.readFileSync(st.historyFile, 'utf8') : undefined,
+    recommendations: readJson(recPath(st.dir)),
+  };
+}
+
+/** Replace the library with a backup. What was there is kept in backups/ first. */
+function restoreBackup(b: Backup) {
+  const st = need();
+  const lib = b?.library;
+  if (b?.app !== 'manga-tracker-backup' || !lib || lib.schemaVersion !== 1 || !Array.isArray(lib.series) || typeof lib.siteMappings !== 'object'
+    || !lib.series.every((s) => s && typeof s.id === 'string' && typeof s.titles === 'object' && typeof s.progress === 'number')) {
+    throw new Error('That file is not a Manga Tracker backup.');
+  }
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const keep = path.join(st.dir, 'backups', `before-restore-${stamp}.json`);
+  fs.writeFileSync(keep, JSON.stringify(makeBackup()));
+  const write = (file: string, data?: string) => {
+    if (data === undefined) fs.rmSync(file, { force: true });
+    else fs.writeFileSync(file, data);
+  };
+  write(st.libFile, JSON.stringify(lib, null, 2));
+  write(path.join(st.dir, 'reading-log.json'), b.readingLog ? JSON.stringify(b.readingLog) : undefined);
+  write(st.historyFile, typeof b.history === 'string' ? b.history : undefined);
+  write(recPath(st.dir), b.recommendations ? JSON.stringify(b.recommendations) : undefined);
+  store = new Store(st.dir);
+  readLog = undefined;
+  store.save();
+  log(`restore: ${lib.series.length} series from a backup saved ${b.savedAt}; previous library kept as ${path.basename(keep)}`);
+  void fetchImages().catch(report);
+  void checkSites(true).catch(report);
+  return { series: lib.series.length, kept: keep };
+}
+
 function seedSites() {
   const st = need();
   const set = st.lib.settings;
@@ -1218,6 +1425,10 @@ const handlers: Record<string, (...a: any[]) => unknown> = {
     return { links: visits.length, series, added: st.lib.pending.filter((p) => !before.has(p.key)).length };
   },
   exportCsv: () => need().toCsv(),
+  backup: () => makeBackup(),
+  restore: (b: Backup) => restoreBackup(b),
+  findElsewhere: (id: string) => findElsewhere(String(id)),
+  checkSites: () => checkSites(true),
   openDoc(name: string) {
     const file = path.join(__dirname, '..', 'docs', path.basename(String(name)));
     if (fs.existsSync(file)) spawn('explorer.exe', [file], { detached: true, stdio: 'ignore' }).unref();
@@ -1274,6 +1485,7 @@ function background() {
   seedSites();
   void backfillAdult().then(backfillCountry).catch(report);
   void fetchImages().catch(report);
+  void checkSites().catch(report);
   void fixNovelMismatches().catch(report).then(() => refreshChapters()).catch(report);
   if (getToken() && store.lib.settings.syncEnabled) void sync(true).catch(report);
   if (cfg.historyPath && store.lib.settings.trackedSites.length) void scan(false, true).catch(report);
@@ -1295,6 +1507,7 @@ function schedule() {
   setInterval(() => {
     if (!store) return;
     void refreshChapters().catch(report);
+    void checkSites().catch(report);
     const fetched = loadRecs()?.fetchedAt;
     if (fetched && Date.now() - fetched > REC_REFRESH_MS) void fetchRecommendations().catch(report);
   }, 6 * 60 * 60 * 1000);

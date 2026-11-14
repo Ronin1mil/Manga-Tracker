@@ -73,6 +73,17 @@ function toHit(m: DexManga): DexHit {
   };
 }
 
+/** A direct link to one English chapter on MangaDex, when it has that chapter. */
+export async function chapterLink(mangaId: string, chapter: number): Promise<string | undefined> {
+  const q = new URLSearchParams({ manga: mangaId, chapter: String(chapter), limit: '1' });
+  q.append('translatedLanguage[]', 'en');
+  for (const r of ['safe', 'suggestive', 'erotica', 'pornographic']) q.append('contentRating[]', r);
+  const res = await fetch(`${API}/chapter?${q}`, { headers: { 'User-Agent': 'manga-tracker', Accept: 'application/json' } });
+  if (!res.ok) return undefined;
+  const json = (await res.json()) as { data?: { id: string }[] };
+  return json.data?.[0] ? `https://mangadex.org/chapter/${json.data[0].id}` : undefined;
+}
+
 export async function search(title: string, attempt = 0): Promise<DexHit[]> {
   const q = new URLSearchParams({ title, limit: '8' });
   for (const inc of ['cover_art', 'author', 'artist']) q.append('includes[]', inc);

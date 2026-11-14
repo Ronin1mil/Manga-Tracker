@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import {
   displayTitle,
   isNovel,
@@ -13,7 +13,10 @@ import {
   type Status,
   type ViewSeries,
   kindLabel, unreadChapters,
+  type Backup,
+  type SiteOption,
 } from '../shared/types';
+import { bestLink, chapterUrl, hostOf, onDeadSite } from '../shared/links';
 import { KNOWN_SITES } from '../shared/sites';
 
 declare global {
@@ -205,6 +208,7 @@ export function App() {
       )}
 
       <main>
+        {tab === 'CURRENT' && !query.trim() && <ContinueRow series={series} dead={state.deadSites} call={call} open={setOpenId} />}
         {tab === 'FORYOU' ? (
           <ForYou state={state} call={call} />
         ) : shown.length === 0 ? (
@@ -232,6 +236,9 @@ export function App() {
                   <Chapters s={s} />
                   {s.lastReadAt ? <span title={`Last read ${new Date(s.lastReadAt).toLocaleString()}`}> · {shortAgo(s.lastReadAt)}</span> : null}
                   <Unread s={s} />
+                  {s.status !== 'COMPLETED' && s.status !== 'DROPPED' && nextLink(s, state.deadSites).gone && (
+                    <span className="badge closed" title="The site this was read on has closed or moved. Open the series to find it somewhere else."> Site closed</span>
+                  )}
                   {isNovel(s) && <span className="badge novel" title="This is a novel, not a comic">Novel</span>}
                   {s.needsDetails && <span className="badge" title="No source has details for this series yet"> No details</span>}
                 </div>
@@ -244,7 +251,7 @@ export function App() {
         )}
       </main>
 
-      {open && <Detail key={open.id} s={open} all={everything} call={call} close={() => setOpenId(null)} open={setOpenId} />}
+      {open && <Detail key={open.id} s={open} all={everything} dead={state.deadSites} call={call} close={() => setOpenId(null)} open={setOpenId} />}
       {modal === 'add' && <Add call={call} close={() => setModal(null)} />}
       {modal === 'pending' && <Pending state={state} call={call} close={() => setModal(null)} />}
       {modal === 'stats' && <Stats call={call} close={() => setModal(null)} open={(id) => { setModal(null); setOpenId(id); }} />}
@@ -289,6 +296,57 @@ function remember(key: string, value: string) {
   } catch {
     /* private window: just not remembered */
   }
+}
+
+/** What "continue" should open: the next chapter when one is out and the site's links allow it, else the last page read. */
+function nextLink(s: ViewSeries, dead?: string[]): { url?: string; chapter?: number; gone: boolean } {
+  const link = bestLink(s, dead);
+  const gone = onDeadSite(link, dead);
+  const next = Math.floor(s.progress) + 1;
+  const url = !gone && (unreadChapters(s) ?? 0) > 0 ? chapterUrl(link, next) : undefined;
+  return url ? { url, chapter: next, gone } : { url: link, gone };
+}
+
+/** The few series you read most recently that have chapters waiting, one click from the next chapter. */
+function ContinueRow({ series, dead, call, open }: { series: ViewSeries[]; dead?: string[]; call: Call; open: (id: string) => void }) {
+  const [hidden, setHidden] = useState(() => saved('continue', '') === 'off');
+  const items = useMemo(
+    () => series
+      .filter((s) => !s.origin && (s.status === 'CURRENT' || s.status === 'REPEATING') && s.lastReadAt && (unreadChapters(s) ?? 0) > 0)
+      .sort((a, b) => b.lastReadAt! - a.lastReadAt!)
+      .slice(0, 8),
+    [series],
+  );
+  if (!items.length) return null;
+  return (
+    <section className="continue">
+      <div className="continueHead">
+        <h3>Continue reading</h3>
+        <button className="linkish" onClick={() => { setHidden(!hidden); remember('continue', hidden ? '' : 'off'); }}>{hidden ? 'Show' : 'Hide'}</button>
+      </div>
+      {!hidden && (
+        <div className="continueRow">
+          {items.map((s) => {
+            const n = nextLink(s, dead);
+            const unread = unreadChapters(s)!;
+            const direct = !n.gone && !!n.url;
+            return (
+              <button
+                key={s.id}
+                className="cont"
+                title={n.gone ? 'The site this was read on has closed. Click to find it somewhere else.' : n.chapter ? `Open chapter ${n.chapter} on ${hostOf(n.url)}` : `Open the last chapter you read on ${hostOf(n.url) ?? 'the site'}`}
+                onClick={() => (direct ? void call('openExternal', n.url) : open(s.id))}
+              >
+                <Cover s={s} />
+                <span className="title">{displayTitle(s)}</span>
+                <span className="ch">{n.gone ? 'Site closed' : `Ch. ${Math.floor(s.progress) + 1} · ${unread > 999 ? '999+' : unread} new`}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
 }
 
 /** "3 new": chapters that are out and not read yet, for series you are following. */
@@ -561,7 +619,8 @@ function Sheet({ title, close, wide, children }: { title: string; close: () => v
   );
 }
 
-function Detail({ s, all, call, close, open }: { s: ViewSeries; all: ViewSeries[]; call: Call; close: () => void; open: (id: string) => void }) {
+function Detail({ s, all, dead, call, close, open }: { s: ViewSeries; all: ViewSeries[]; dead?: string[]; call: Call; close: () => void; open: (id: string) => void }) {
+  const [options, setOptions] = useState<SiteOption[] | 'loading' | null>(null);
   const [chapter, setChapter] = useState(String(s.progress));
   const [readAt, setReadAt] = useState(s.readAt ?? '');
   const [notes, setNotes] = useState(s.notes ?? '');
@@ -569,7 +628,21 @@ function Detail({ s, all, call, close, open }: { s: ViewSeries; all: ViewSeries[
   const [merging, setMerging] = useState(false);
   useEffect(() => setChapter(String(s.progress)), [s.progress]);
   const upd = (patch: object) => call('updateSeries', s.id, patch);
-  const link = s.lastUrl || s.readAt;
+  const next = nextLink(s, dead);
+  const link = next.url;
+  const findSites = async () => {
+    if (options) return setOptions(null);
+    setOptions('loading');
+    setOptions((await call('findElsewhere', s.id)) ?? null);
+  };
+  const useOption = (o: SiteOption) => {
+    void call('openExternal', o.url);
+    // Remember a real page as the new place to read; a search result page is not one.
+    if (o.kind !== 'search') {
+      setReadAt(o.url);
+      void upd({ readAt: o.url });
+    }
+  };
   return (
     <Sheet title={displayTitle(s)} close={close} wide>
       <div className="detail">
@@ -608,6 +681,24 @@ function Detail({ s, all, call, close, open }: { s: ViewSeries; all: ViewSeries[
               <button onClick={() => upd({ promote: true })}>Move to Reading</button>
             </div>
           )}
+          {next.gone && (
+            <div className="bar inline">
+              {hostOf(link)} has closed or moved, so the saved link no longer works.
+              <button className="primary" onClick={findSites}>Find another site</button>
+            </div>
+          )}
+          {options === 'loading' && <p className="muted">Looking on the sites you read on…</p>}
+          {Array.isArray(options) && (
+            <div className="merge">
+              {options.map((o) => (
+                <button key={o.url} className="mergeRow" onClick={() => useOption(o)}>
+                  <span><b>{o.site}</b> · {o.note}</span>
+                  <small>{o.kind === 'found' ? 'Checked ✓' : o.kind === 'guess' ? 'Not checked' : 'Search'}</small>
+                </button>
+              ))}
+              <p className="muted">Opening a site link also saves it under "Read at". Once you read a chapter there, the tracker follows that site by itself.</p>
+            </div>
+          )}
           <div className="row">
             <button onClick={() => upd({ progress: Math.max(0, Math.floor(s.progress) - 1) })}>−1</button>
             <input
@@ -636,7 +727,8 @@ function Detail({ s, all, call, close, open }: { s: ViewSeries; all: ViewSeries[
           <label>Notes</label>
           <textarea value={notes} rows={3} onChange={(e) => setNotes(e.target.value)} onBlur={() => notes !== (s.notes ?? '') && upd({ notes })} />
           <div className="row">
-            {link && <button className="primary" onClick={() => call('openExternal', link)}>Continue reading</button>}
+            {link && !next.gone && <button className="primary" onClick={() => call('openExternal', link)}>{next.chapter ? `Read chapter ${next.chapter}` : 'Continue reading'}</button>}
+            {!next.gone && <button title="Find this series on the other sites you read on, or search the web for it" onClick={findSites}>Other sites…</button>}
             {s.anilistUrl && <button onClick={() => call('openExternal', s.anilistUrl)}>Open on AniList</button>}
             <span className="grow" />
             <button title="This is the same series as another entry in your library" onClick={() => setMerging(!merging)}>Merge…</button>
@@ -1006,6 +1098,36 @@ function Settings({ state, call, error, close, runSetup }: { state: AppState; ca
   const [importMsg, setImportMsg] = useState('');
   const extras = state.extraSources ?? [];
   const [inbox, setInbox] = useState(state.inboxPath ?? '');
+  const [backupMsg, setBackupMsg] = useState('');
+  const fileRef = useRef<HTMLInputElement>(null);
+  const saveBackup = async () => {
+    const b = (await call('backup')) as Backup | undefined;
+    if (!b) return;
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(b)], { type: 'application/json' }));
+    a.download = `manga-tracker-backup-${b.savedAt.slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    setBackupMsg(`Saved ${b.library.series.length} series to ${a.download} in your Downloads folder.`);
+  };
+  const restoreBackup = async (file?: File) => {
+    if (!file) return;
+    let b: Backup;
+    try {
+      b = JSON.parse(await file.text());
+    } catch {
+      setBackupMsg('That file could not be read as a backup.');
+      return;
+    }
+    const n = b?.library?.series?.length;
+    if (b?.app !== 'manga-tracker-backup' || typeof n !== 'number') {
+      setBackupMsg('That file is not a Manga Tracker backup.');
+      return;
+    }
+    if (!confirm(`Replace the library you have now (${lib.series.length + state.hiddenNsfw} series) with this backup from ${new Date(b.savedAt).toLocaleString()} (${n} series)?\n\nThe current library is kept in the backups folder first.`)) return;
+    const r = await call('restore', b);
+    if (r) setBackupMsg(`Restored ${r.series} series. The library from before is in ${r.kept}.`);
+  };
   // A page copied with Ctrl+A / Ctrl+C keeps its links in the clipboard's HTML form.
   const importHtml = async (html: string) => {
     const doc = new DOMParser().parseFromString(html, 'text/html');
@@ -1040,9 +1162,13 @@ function Settings({ state, call, error, close, runSetup }: { state: AppState; ca
           Change…
         </button>
         <button onClick={() => call('exportCsv')}>Export CSV</button>
+        <button title="Save the whole library, reading history and stats to one file" onClick={saveBackup}>Save backup</button>
+        <button title="Replace this library with a backup file, here or on another PC" onClick={() => fileRef.current?.click()}>Restore backup…</button>
+        <input ref={fileRef} type="file" accept=".json,application/json" hidden onChange={(e) => { void restoreBackup(e.target.files?.[0]); e.target.value = ''; }} />
         <button onClick={runSetup}>Run setup again</button>
         <button title="Timings for matching, cover downloads and history checks" onClick={() => call('openLog')}>Open log</button>
       </div>
+      {backupMsg && <p className="muted">{backupMsg}</p>}
       <label className="check">
         <input type="checkbox" checked={lib.settings.downloadImages === true} onChange={(e) => call('setSettings', { downloadImages: e.target.checked })} />
         Download cover images from AniList into the library folder

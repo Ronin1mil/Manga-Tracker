@@ -19,3 +19,6 @@ covers/
 History
 Bookmarks
 .claude/
+
+manga-tracker-backup-*.json
+before-restore-*.json

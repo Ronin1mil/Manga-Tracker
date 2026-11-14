@@ -115,3 +115,9 @@ App settings (chosen library, history source, encrypted AniList token) are in `%
 Settings → **Other browsers** reads more browser history files on this PC (Edge, Brave, Vivaldi, Opera, Firefox) alongside the main one, which is also how reading in those browsers on a phone arrives. Safari on an iPhone goes through an inbox text file filled by a share-sheet Shortcut. Both are described in [docs/other-browsers.md](docs/other-browsers.md).
 
 Every sort has a direction button next to it, and merging two entries lets you choose whose details, chapter and status to keep.
+
+## Continue reading, closed sites, backup
+
+- **Continue reading**: the Reading tab starts with the series you read most recently that have chapters waiting. A click opens the next chapter where the site's links allow it, otherwise the last page you read.
+- **Closed sites**: once a day the tracker checks whether the sites your links point at are still there. A series whose site is gone gets a "Site closed" badge and a **Find another site** button. It looks on the sites you already read on (building the link the way that site does, and checking it where the site allows), then MangaDex, then offers Google searches. Titles are sent to those sites to do this.
+- **Backup**: Settings → **Save backup** downloads one file with the library, reading history and stats. **Restore backup…** replaces the library with such a file, here or on another PC; the library from before is kept in `backups/`. The AniList login is not in the file.
