@@ -103,3 +103,9 @@ App settings (chosen library, history source, encrypted AniList token) are in `%
 - `src/main/mangadex.ts`, `src/main/mangaupdates.ts` — backup sources for details, novels and chapter counts
 - `src/shared/sites.ts` — the built-in list of reading sites
 - `src/renderer/` — the React interface
+
+## New chapters, duplicates and kinds
+
+- **New chapters:** a card shows "3 new" when chapters are out that you haven't read. Sort by "New chapters to read" to see the series you are closest to caught up on first. Counts for series you are reading are checked daily, the rest weekly.
+- **Merging duplicates:** open either entry, press **Merge…** and pick the other one. Their sites, the higher chapter, notes and reading stats are combined; the entry with details from a source is the one kept. Two entries that are different series on AniList are refused.
+- **Manga, manhwa, manhua:** the country a series comes from is recorded and shown, and recommendations use it to tell the three apart.

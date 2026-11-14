@@ -28,6 +28,8 @@ export interface SeriesMeta {
   totalChapters?: number;
   totalVolumes?: number;
   pubStatus?: string;
+  /** Country it was first published in: JP, KR, CN or TW. Tells manga, manhwa and manhua apart. */
+  country?: string;
   /** AniList's average reader score, 0-100; only kept for recommendation candidates. */
   communityScore?: number;
   /** AniList marks the series as adult (18+), or it carries the Hentai genre. */
@@ -117,6 +119,8 @@ export interface Library {
   series: Series[];
   /** AniList ids of recommendations you said you're not interested in. */
   recDismissed?: number[];
+  /** Country of origin has been looked up for series saved before it was recorded. */
+  countryChecked?: boolean;
 }
 
 export interface Recommendation {
@@ -213,6 +217,22 @@ export type PendingAction =
   | { type: 'ignore' };
 
 export const isNovel = (s: { format?: string }) => s.format === 'NOVEL';
+
+/** "Manhwa", "Manhua", "Manga", "Novel"…: what kind of series this is, from its format and country. */
+export function kindLabel(s: { format?: string; country?: string }): string | undefined {
+  if (s.format === 'NOVEL') return s.country === 'KR' ? 'Korean novel' : s.country === 'CN' || s.country === 'TW' ? 'Chinese novel' : 'Novel';
+  if (s.format === 'MANHWA' || s.country === 'KR') return 'Manhwa';
+  if (s.format === 'MANHUA' || s.country === 'CN' || s.country === 'TW') return 'Manhua';
+  if (s.format === 'ONE_SHOT') return 'One-shot';
+  if (s.format === 'MANGA' || s.country === 'JP') return 'Manga';
+  return s.format;
+}
+
+/** Chapters that are out and not read yet; undefined when nobody knows how many are out. */
+export function unreadChapters(s: { totalChapters?: number; latestChapter?: number; progress: number }): number | undefined {
+  const known = s.totalChapters ?? s.latestChapter;
+  return known ? Math.max(0, Math.floor(known) - Math.floor(s.progress)) : undefined;
+}
 
 /** The highest chapter there is to read: the final count, else what's released so far, never less than what you've read. */
 export function maxChapters(s: { totalChapters?: number; latestChapter?: number; progress: number }): number | undefined {

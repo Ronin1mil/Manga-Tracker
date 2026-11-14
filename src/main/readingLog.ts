@@ -57,6 +57,21 @@ export class ReadingLog {
     }
   }
 
+  /** Move everything logged under one key to another (used when two entries are merged). */
+  rename(from: string, to: string) {
+    for (const byKey of Object.values(this.data.days)) {
+      const moved = byKey[from];
+      if (!moved) continue;
+      delete byKey[from];
+      for (const c of moved) {
+        if (this.seen.has(`${to}#${c}`)) continue;
+        this.seen.add(`${to}#${c}`);
+        (byKey[to] ??= []).push(c);
+      }
+      this.changed = true;
+    }
+  }
+
   save() {
     if (!this.file || !this.changed) return;
     fs.writeFileSync(this.file + '.tmp', JSON.stringify(this.data));

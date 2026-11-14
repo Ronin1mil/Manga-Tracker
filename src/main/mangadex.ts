@@ -36,6 +36,7 @@ interface DexManga {
 
 const STATUS: Record<string, string> = { ongoing: 'RELEASING', completed: 'FINISHED', hiatus: 'HIATUS', cancelled: 'CANCELLED' };
 const FORMAT: Record<string, string> = { ko: 'MANHWA', zh: 'MANHUA', 'zh-hk': 'MANHUA', ja: 'MANGA' };
+const COUNTRY: Record<string, string> = { ko: 'KR', zh: 'CN', 'zh-hk': 'CN', ja: 'JP' };
 
 function toHit(m: DexManga): DexHit {
   const a = m.attributes;
@@ -62,6 +63,7 @@ function toHit(m: DexManga): DexHit {
       authors: [...new Set(m.relationships.filter((r) => r.type === 'author' || r.type === 'artist').map((r) => r.attributes?.name).filter((n): n is string => !!n))],
       genres: (a.tags ?? []).filter((t) => t.attributes.group === 'genre' || t.attributes.group === 'theme').map((t) => t.attributes.name.en).filter(Boolean),
       format: FORMAT[a.originalLanguage ?? ''],
+      country: COUNTRY[a.originalLanguage ?? ''],
       year: a.year ?? undefined,
       totalChapters: a.status === 'completed' && Number.isFinite(last) && last > 0 ? Math.floor(last) : undefined,
       pubStatus: STATUS[a.status ?? ''],

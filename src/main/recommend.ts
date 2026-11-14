@@ -54,7 +54,11 @@ export function weight(s: Series, now = Date.now()): number {
 /** The features a series is compared on: genres, where it's from (manga/manhwa/manhua/novel), and its era. */
 function features(m: SeriesMeta): string[] {
   const out = (m.genres ?? []).map((g) => `g:${g}`);
-  if (m.format) out.push(`f:${m.format}`);
+  if (m.format === 'NOVEL') out.push('f:NOVEL');
+  // Country separates manga, manhwa and manhua, which AniList all files under one format.
+  const from = m.country ?? (m.format === 'MANHWA' ? 'KR' : m.format === 'MANHUA' ? 'CN' : undefined);
+  if (from) out.push(`c:${from === 'TW' ? 'CN' : from}`);
+  else if (m.format && m.format !== 'NOVEL') out.push(`f:${m.format}`);
   if (m.year) out.push(`y:${m.year >= 2020 ? '2020s' : m.year >= 2010 ? '2010s' : 'older'}`);
   return out;
 }

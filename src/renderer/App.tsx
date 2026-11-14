@@ -12,6 +12,7 @@ import {
   type SeriesMeta,
   type Status,
   type ViewSeries,
+  kindLabel, unreadChapters,
 } from '../shared/types';
 import { KNOWN_SITES } from '../shared/sites';
 
@@ -31,7 +32,7 @@ export function App() {
   const [state, setState] = useState<AppState | null>(null);
   const [tab, setTab] = useState<Status | 'ALL' | 'BOOKMARKS' | 'FORYOU'>('CURRENT');
   const [query, setQuery] = useState('');
-  const [sort, setSort] = useState<'read' | 'updated' | 'title' | 'percent'>('read');
+  const [sort, setSort] = useState<'read' | 'updated' | 'title' | 'percent' | 'unread'>('read');
   const [kind, setKind] = useState<'all' | 'manga' | 'novel'>('all');
   const [openId, setOpenId] = useState<string | null>(null);
   const [modal, setModal] = useState<Modal>(null);
@@ -94,6 +95,7 @@ export function App() {
       .filter((s) => !q || [s.titles.english, s.titles.romaji, s.titles.native, s.siteTitle, ...(s.altTitles ?? [])].some((t) => t?.toLowerCase().includes(q)))
       .sort((a, b) =>
         sort === 'title' ? displayTitle(a).localeCompare(displayTitle(b))
+        : sort === 'unread' ? unreadRank(a) - unreadRank(b) || (b.lastReadAt ?? 0) - (a.lastReadAt ?? 0)
         : sort === 'percent' ? (percentRead(b) ?? -1) - (percentRead(a) ?? -1) || b.updatedAt - a.updatedAt
         : sort === 'read' ? (b.lastReadAt ?? 0) - (a.lastReadAt ?? 0) || b.updatedAt - a.updatedAt
         : b.updatedAt - a.updatedAt);
@@ -151,6 +153,7 @@ export function App() {
             <option value="updated">Last updated</option>
             <option value="title">Title</option>
             <option value="percent">Percent read</option>
+            <option value="unread">New chapters to read</option>
           </select>
           <button
             className={lib.settings.showNsfw ? 'nsfw on' : 'nsfw'}
@@ -219,6 +222,7 @@ export function App() {
                 <div className="ch">
                   <Chapters s={s} />
                   {s.lastReadAt ? <span title={`Last read ${new Date(s.lastReadAt).toLocaleString()}`}> · {shortAgo(s.lastReadAt)}</span> : null}
+                  <Unread s={s} />
                   {isNovel(s) && <span className="badge novel" title="This is a novel, not a comic">Novel</span>}
                   {s.needsDetails && <span className="badge" title="No source has details for this series yet"> No details</span>}
                 </div>
@@ -231,7 +235,7 @@ export function App() {
         )}
       </main>
 
-      {open && <Detail s={open} call={call} close={() => setOpenId(null)} />}
+      {open && <Detail key={open.id} s={open} all={everything} call={call} close={() => setOpenId(null)} open={setOpenId} />}
       {modal === 'add' && <Add call={call} close={() => setModal(null)} />}
       {modal === 'pending' && <Pending state={state} call={call} close={() => setModal(null)} />}
       {modal === 'stats' && <Stats call={call} close={() => setModal(null)} open={(id) => { setModal(null); setOpenId(id); }} />}
@@ -247,6 +251,19 @@ type Call = (name: string, ...args: unknown[]) => Promise<any>;
 const SITES_HINT = KNOWN_SITES.map((k) => k.domain).join('\n');
 
 /** "today", "3d ago", "2w ago", "5mo ago", "2y ago". */
+/** Series with chapters waiting come first, the ones you are closest to caught up on at the top. */
+function unreadRank(s: ViewSeries) {
+  const n = unreadChapters(s);
+  return n ? n : n === 0 ? 1e6 : 2e6;
+}
+
+/** "3 new": chapters that are out and not read yet, for series you are following. */
+function Unread({ s }: { s: ViewSeries }) {
+  const n = unreadChapters(s);
+  if (!n || s.status === 'COMPLETED' || s.status === 'DROPPED') return null;
+  return <span className="badge new" title={`${n} chapter${n === 1 ? '' : 's'} out that you haven't read`}>{n > 999 ? '999+' : n} new</span>;
+}
+
 function shortAgo(ms: number) {
   const d = Math.floor((Date.now() - ms) / 86_400_000);
   if (d < 1) return 'today';
@@ -510,11 +527,12 @@ function Sheet({ title, close, wide, children }: { title: string; close: () => v
   );
 }
 
-function Detail({ s, call, close }: { s: ViewSeries; call: Call; close: () => void }) {
+function Detail({ s, all, call, close, open }: { s: ViewSeries; all: ViewSeries[]; call: Call; close: () => void; open: (id: string) => void }) {
   const [chapter, setChapter] = useState(String(s.progress));
   const [readAt, setReadAt] = useState(s.readAt ?? '');
   const [notes, setNotes] = useState(s.notes ?? '');
   const [finding, setFinding] = useState(false);
+  const [merging, setMerging] = useState(false);
   useEffect(() => setChapter(String(s.progress)), [s.progress]);
   const upd = (patch: object) => call('updateSeries', s.id, patch);
   const link = s.lastUrl || s.readAt;
@@ -527,7 +545,7 @@ function Detail({ s, call, close }: { s: ViewSeries; call: Call; close: () => vo
             {[s.siteTitle, s.titles.romaji, s.titles.native].filter((t, i, all) => t && t.toLowerCase() !== displayTitle(s).toLowerCase() && all.indexOf(t) === i).join(' · ')}
           </div>
           <div className="muted">
-            {[s.format, s.year, s.pubStatus?.toLowerCase().replace(/_/g, ' '), s.authors?.join(', ')].filter(Boolean).join(' · ')}
+            {[kindLabel(s), s.year, s.pubStatus?.toLowerCase().replace(/_/g, ' '), s.authors?.join(', ')].filter(Boolean).join(' · ')}
           </div>
           {s.genres?.length ? <div className="muted">{s.genres.join(', ')}</div> : null}
           <div className="row">
@@ -587,6 +605,7 @@ function Detail({ s, call, close }: { s: ViewSeries; call: Call; close: () => vo
             {link && <button className="primary" onClick={() => call('openExternal', link)}>Continue reading</button>}
             {s.anilistUrl && <button onClick={() => call('openExternal', s.anilistUrl)}>Open on AniList</button>}
             <span className="grow" />
+            <button title="This is the same series as another entry in your library" onClick={() => setMerging(!merging)}>Merge…</button>
             <button
               className="danger"
               onClick={() => {
@@ -599,10 +618,56 @@ function Detail({ s, call, close }: { s: ViewSeries; call: Call; close: () => vo
               Remove
             </button>
           </div>
+          {merging && (
+            <MergePicker
+              s={s}
+              all={all}
+              onPick={async (other) => {
+                if (!confirm(`Merge "${displayTitle(other)}" into "${displayTitle(s)}"? Their sites, the higher chapter and your notes are combined into one entry.`)) return;
+                const kept = await call('mergeSeries', s.id, other.id);
+                setMerging(false);
+                if (kept && kept !== s.id) open(kept);
+              }}
+            />
+          )}
           {s.description && <p className="desc">{s.description}</p>}
         </div>
       </div>
     </Sheet>
+  );
+}
+
+/** Pick the other library entry that is the same series. Likely duplicates (shared words in the name) are listed first. */
+function MergePicker({ s, all, onPick }: { s: ViewSeries; all: ViewSeries[]; onPick: (other: ViewSeries) => void }) {
+  const [q, setQ] = useState('');
+  const words = (t: string) => new Set(t.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((w) => w.length > 2));
+  const mine = words([displayTitle(s), s.siteTitle ?? '', s.titles.romaji ?? ''].join(' '));
+  const list = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    return all
+      .filter((o) => o.id !== s.id)
+      .map((o) => {
+        const names = [displayTitle(o), o.siteTitle ?? '', o.titles.romaji ?? '', ...(o.altTitles ?? [])].join(' ');
+        const theirs = words(names);
+        let shared = 0;
+        for (const w of mine) if (theirs.has(w)) shared++;
+        return { o, names: names.toLowerCase(), like: mine.size ? shared / mine.size : 0 };
+      })
+      .filter((x) => (needle ? x.names.includes(needle) : x.like >= 0.5))
+      .sort((a, b) => b.like - a.like || displayTitle(a.o).localeCompare(displayTitle(b.o)))
+      .slice(0, 8);
+  }, [all, s.id, q]);
+  return (
+    <div className="merge">
+      <input autoFocus value={q} placeholder="Type the name of the other entry" onChange={(e) => setQ(e.target.value)} />
+      {list.length === 0 && <div className="muted">{q.trim() ? 'No entry with that name.' : 'No likely duplicates found. Type a name to search your library.'}</div>}
+      {list.map(({ o }) => (
+        <button key={o.id} className="mergeRow" onClick={() => onPick(o)}>
+          <span>{displayTitle(o)}</span>
+          <small>{[STATUS_LABEL[o.status], `ch. ${o.progress}`, o.origin === 'bookmark' && 'bookmark', o.needsDetails && 'no details'].filter(Boolean).join(' · ')}</small>
+        </button>
+      ))}
+    </div>
   );
 }
 

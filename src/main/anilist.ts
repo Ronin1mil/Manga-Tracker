@@ -7,7 +7,7 @@ const MEDIA = `
 fragment M on Media {
   id title { romaji english native } synonyms description(asHtml: false)
   coverImage { extraLarge large } bannerImage chapters volumes status format
-  startDate { year } genres siteUrl isAdult
+  startDate { year } genres siteUrl isAdult countryOfOrigin
   staff(perPage: 4, sort: RELEVANCE) { edges { role node { name { full } } } }
 }`;
 
@@ -22,6 +22,7 @@ interface Media {
   volumes?: number;
   status?: string;
   format?: string;
+  countryOfOrigin?: string;
   startDate?: { year?: number };
   genres?: string[];
   siteUrl?: string;
@@ -109,6 +110,20 @@ export async function adultFlags(ids: number[], token?: string): Promise<Map<num
   return out;
 }
 
+/** Country of origin for series saved before it was recorded. */
+export async function countries(ids: number[], token?: string): Promise<Map<number, string>> {
+  const out = new Map<number, string>();
+  for (let i = 0; i < ids.length; i += 50) {
+    const d = await gql<{ Page: { media: { id: number; countryOfOrigin?: string }[] } }>(
+      'query ($ids: [Int]) { Page(perPage: 50) { media(id_in: $ids, type: MANGA) { id countryOfOrigin } } }',
+      { ids: ids.slice(i, i + 50) },
+      token,
+    );
+    for (const m of d.Page.media) if (m.countryOfOrigin) out.set(m.id, m.countryOfOrigin);
+  }
+  return out;
+}
+
 function toMeta(m: Media): SearchHit {
   return {
     anilistId: m.id,
@@ -118,6 +133,7 @@ function toMeta(m: Media): SearchHit {
     authors: [...new Set((m.staff?.edges ?? []).filter((e) => /story|art/i.test(e.role)).map((e) => e.node.name.full))],
     genres: m.genres ?? [],
     format: m.format ?? undefined,
+    country: m.countryOfOrigin ?? undefined,
     year: m.startDate?.year ?? undefined,
     totalChapters: m.chapters ?? undefined,
     totalVolumes: m.volumes ?? undefined,
@@ -138,7 +154,7 @@ export interface RecLink {
   media: SearchHit;
 }
 
-const REC_FIELDS = 'id type title { romaji english native } description(asHtml: false) coverImage { extraLarge large } chapters status format startDate { year } genres siteUrl isAdult averageScore';
+const REC_FIELDS = 'id type title { romaji english native } description(asHtml: false) coverImage { extraLarge large } chapters status format startDate { year } genres siteUrl isAdult averageScore countryOfOrigin';
 
 /** What the community recommends for each of these series. Several series per request; the batch shrinks if AniList says the query is too complex. */
 export async function recommendationsFor(ids: number[], token?: string, onProgress?: (done: number) => void): Promise<RecLink[]> {

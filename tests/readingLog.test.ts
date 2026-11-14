@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ReadingLog, dayOf } from '../src/main/readingLog';
 import { parseChapterUrl } from '../src/main/chapterParser';
+import { kindLabel, unreadChapters } from '../src/shared/types';
 
 const DAY = 86_400_000;
 const NOW = new Date(2026, 10, 14, 15, 0, 0).getTime(); // Sat 14 Nov 2026, local time
@@ -64,5 +65,32 @@ describe('old bookmark links', () => {
   it('reads the usual /manga/<name>/chapter/<n> shape', () => {
     expect(parseChapterUrl('https://mangafarm.com/manga/return-of-immortal-emperor/chapter/163', 'Return Of Immortal Emperor Chapter 163'))
       .toMatchObject({ domain: 'mangafarm.com', slug: 'return-of-immortal-emperor', chapter: 163 });
+  });
+});
+
+describe('merging and unread counts', () => {
+  it('moves a merged entry\u2019s reading to the entry that is kept, without double counting', () => {
+    const log = new ReadingLog();
+    log.add('id:a', 1, NOW - DAY);
+    log.add('id:a', 2, NOW);
+    log.add('id:b', 2, NOW - DAY);
+    log.add('id:b', 3, NOW);
+    log.rename('id:b', 'id:a');
+    const st = log.stats((k) => (k === 'id:a' ? { id: 'a', title: 'A' } : undefined), NOW);
+    expect(st.top).toEqual([{ id: 'a', title: 'A', chapters: 3 }]);
+    expect(st.unnamed30).toBe(0);
+    expect(log.add('id:a', 3, NOW)).toBe(false);
+  });
+  it('counts chapters that are out and unread', () => {
+    expect(unreadChapters({ progress: 97.5, latestChapter: 100 })).toBe(3);
+    expect(unreadChapters({ progress: 120, totalChapters: 110 })).toBe(0);
+    expect(unreadChapters({ progress: 5 })).toBeUndefined();
+  });
+  it('names the kind of series from its country', () => {
+    expect(kindLabel({ format: 'MANGA', country: 'KR' })).toBe('Manhwa');
+    expect(kindLabel({ format: 'MANGA', country: 'CN' })).toBe('Manhua');
+    expect(kindLabel({ format: 'MANGA', country: 'JP' })).toBe('Manga');
+    expect(kindLabel({ format: 'NOVEL', country: 'KR' })).toBe('Korean novel');
+    expect(kindLabel({ format: 'MANHWA' })).toBe('Manhwa');
   });
 });

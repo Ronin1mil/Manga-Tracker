@@ -800,7 +800,8 @@ async function fetchRecommendations() {
 // ---------- released-chapter counts ----------
 
 let refreshing = false;
-const RECHECK_MS = 7 * 24 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const RECHECK_MS = 7 * DAY_MS;
 
 /**
  * AniList only gives a chapter count once a series has ended. For the rest, look up how many
@@ -809,7 +810,9 @@ const RECHECK_MS = 7 * 24 * 60 * 60 * 1000;
 async function refreshChapters(force = false) {
   const st = need();
   if (refreshing || st.lib.settings.useMangaUpdates === false) return;
-  const due = st.lib.series.filter((s) => !s.totalChapters && (force || !s.latestCheckedAt || Date.now() - s.latestCheckedAt > RECHECK_MS));
+  // Series you are reading right now are looked at daily so "new chapters" stays current; the rest weekly.
+  const every = (s: Series) => ((s.status === 'CURRENT' || s.status === 'REPEATING') && !s.origin && s.lastReadAt && Date.now() - s.lastReadAt < 45 * DAY_MS ? DAY_MS : RECHECK_MS);
+  const due = st.lib.series.filter((s) => !s.totalChapters && (force || !s.latestCheckedAt || Date.now() - s.latestCheckedAt > every(s)));
   if (!due.length) return;
   refreshing = true;
   const started = Date.now();
@@ -1010,6 +1013,48 @@ const handlers: Record<string, (...a: any[]) => unknown> = {
     st.add({ titles: { english: title.trim() } }, { status: 'CURRENT' }, 'manual');
     st.save();
   },
+  /** Fold one entry into another: the same series that ended up in the library twice. */
+  mergeSeries(keepId: string, otherId: string) {
+    const st = need();
+    let keep = st.get(keepId);
+    let other = st.get(otherId);
+    if (!keep || !other || keep === other) return;
+    if (keep.anilistId && other.anilistId && keep.anilistId !== other.anilistId) {
+      throw new Error('These are two different series on AniList, so they were not merged.');
+    }
+    // Keep whichever entry has real details.
+    if ((keep.needsDetails || !keep.anilistId) && other.anilistId) [keep, other] = [other, keep];
+    const ahead = other.progress > keep.progress ? other : keep;
+    if (ahead === other) {
+      keep.lastUrl = other.lastUrl ?? keep.lastUrl;
+      keep.readAt = other.readAt ?? keep.readAt;
+      st.setProgress(keep, other.progress, 'manual');
+    }
+    keep.lastUrl ??= other.lastUrl;
+    keep.readAt ??= other.readAt;
+    keep.lastReadAt = Math.max(keep.lastReadAt ?? 0, other.lastReadAt ?? 0) || undefined;
+    keep.addedAt = Math.min(keep.addedAt, other.addedAt);
+    keep.liked ??= other.liked;
+    keep.score ??= other.score;
+    keep.notes = [keep.notes, other.notes].filter(Boolean).join('\n') || undefined;
+    keep.siteTitle ??= other.siteTitle;
+    keep.latestChapter = Math.max(keep.latestChapter ?? 0, other.latestChapter ?? 0) || undefined;
+    keep.altTitles = [...new Set([...(keep.altTitles ?? []), ...(other.altTitles ?? []), ...namesOf(other).filter((n): n is string => !!n)])].slice(0, 40);
+    if (keep.origin && !other.origin) {
+      delete keep.origin;
+      keep.status = other.status;
+    }
+    for (const [k, v] of Object.entries(st.lib.siteMappings)) if (v === other.id) st.lib.siteMappings[k] = keep.id;
+    readingLog().rename(`id:${other.id}`, `id:${keep.id}`);
+    readingLog().save();
+    keep.updatedAt = Date.now();
+    keep.dirty = true;
+    log(`merge: "${displayTitle(other)}" folded into "${displayTitle(keep)}"`);
+    st.remove(other.id);
+    st.save();
+    void sync().catch(report);
+    return keep.id;
+  },
   removeSeries(id: string) {
     const st = need();
     st.remove(id);
@@ -1151,13 +1196,25 @@ async function backfillAdult() {
   push();
 }
 
+async function backfillCountry() {
+  const st = need();
+  const todo = st.lib.series.filter((s) => s.anilistId && !s.country);
+  if (!todo.length || st.lib.countryChecked) return;
+  const found = await al.countries(todo.map((s) => s.anilistId!), getToken());
+  for (const s of todo) s.country = found.get(s.anilistId!);
+  st.lib.countryChecked = true;
+  log(`country: checked ${todo.length} existing series, ${found.size} found`);
+  st.save();
+  push();
+}
+
 const REC_REFRESH_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** Everything that runs by itself. Each part is independent, so they all start at once. */
 function background() {
   if (!store) return;
   seedSites();
-  void backfillAdult().catch(report);
+  void backfillAdult().then(backfillCountry).catch(report);
   void fetchImages().catch(report);
   void fixNovelMismatches().catch(report).then(() => refreshChapters()).catch(report);
   if (getToken() && store.lib.settings.syncEnabled) void sync(true).catch(report);
