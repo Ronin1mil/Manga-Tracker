@@ -1619,8 +1619,32 @@ function openBrowser(force = false) {
   spawn('cmd', ['/c', 'start', '', ORIGINS[0]], { detached: true, stdio: 'ignore' }).unref();
 }
 
+/** Errors logged since the tracker was last started, newest last; for the note shown at start-up. */
+function errorsFromLastRun(): string[] {
+  try {
+    const lines = fs.readFileSync(logFile(), 'utf8').trimEnd().split('\n');
+    const from = lines.map((l) => l.includes('  started on port ')).lastIndexOf(true);
+    return lines.slice(from + 1).filter((l) => /  (error|crash): /.test(l));
+  } catch {
+    return [];
+  }
+}
+
 function main() {
   fs.mkdirSync(userData, { recursive: true });
+  // Anything that goes wrong outside a request ends up in the log instead of vanishing with the hidden window.
+  process.on('uncaughtException', (err) => {
+    log(`crash: ${err?.stack ?? err}`);
+    lastError = `Something went wrong: ${err?.message ?? err}. Details are in the log (Settings → Open log).`;
+    push();
+  });
+  process.on('unhandledRejection', (err) => {
+    log(`crash: ${(err as Error)?.stack ?? err}`);
+  });
+  const earlier = errorsFromLastRun();
+  if (earlier.length) {
+    lastError = `${earlier.length} error${earlier.length === 1 ? '' : 's'} last time the tracker ran. The latest: ${earlier[earlier.length - 1].replace(/^\S+\s+(error|crash): /, '').split('\n')[0].slice(0, 200)} (Settings → Open log for the rest.)`;
+  }
   try {
     os.setPriority(os.constants.priority.PRIORITY_BELOW_NORMAL); // never compete with whatever else the PC is doing
   } catch {
@@ -1637,12 +1661,14 @@ function main() {
       store = new Store(cfg.libraryPath);
     } catch (err) {
       lastError = `Could not open library at ${cfg.libraryPath}: ${(err as Error).message}`;
+      log(`error: ${lastError}`);
       cfg.libraryPath = undefined;
     }
   }
 
   const server = http.createServer((req, res) => {
-    onRequest(req, res).catch(() => {
+    onRequest(req, res).catch((err) => {
+      log(`error: request ${req.url} failed: ${(err as Error)?.stack ?? err}`);
       if (!res.headersSent) res.writeHead(500);
       res.end();
     });
