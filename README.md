@@ -19,7 +19,7 @@ Requires Node 20 or newer.
 
 ## Start with Windows
 
-Settings → **Start with Windows** adds a per-user startup entry (no administrator rights needed) that runs the server with no window and without opening a browser. Open the tracker from `Manga Tracker.cmd` or `http://127.0.0.1:47800` whenever you want to look at it. Phone reading still only arrives while Chrome on this PC is running and syncing.
+Settings → **Start with Windows** adds a per-user sign-in task (no administrator rights needed; it starts within a second or two of signing in) that runs the server with no window and without opening a browser. Open the tracker from `Manga Tracker.cmd` or `http://127.0.0.1:47800` whenever you want to look at it. Phone reading still only arrives while Chrome on this PC is running and syncing.
 
 What runs by itself, and how often:
 

@@ -86,25 +86,68 @@ function readingLog(): ReadingLog {
 
 const RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
 const RUN_NAME = 'MangaTracker';
+const TASK_NAME = 'MangaTracker';
 let autostart: boolean | undefined;
+const hasRunEntry = () => spawnSync('reg', ['query', RUN_KEY, '/v', RUN_NAME], { windowsHide: true }).status === 0;
+const hasLogonTask = () => spawnSync('schtasks', ['/query', '/tn', TASK_NAME], { windowsHide: true }).status === 0;
 function isAutostart(): boolean {
-  if (autostart === undefined) {
-    autostart = process.platform === 'win32' && spawnSync('reg', ['query', RUN_KEY, '/v', RUN_NAME], { windowsHide: true }).status === 0;
-  }
+  if (autostart === undefined) autostart = process.platform === 'win32' && (hasLogonTask() || hasRunEntry());
   return autostart;
 }
-/** A per-user entry: no administrator rights needed, and it only runs for this Windows account. */
+const xml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+/**
+ * A task that starts the tracker the moment this Windows account signs in. No administrator rights needed.
+ * (Windows holds back ordinary "startup apps" for a minute or more after sign-in, so a browser that
+ * reopens the tracker's tab would find nothing there yet; a sign-in task is not held back.)
+ */
+function logonTaskXml(): string {
+  // conhost --headless runs the server with no window; --background stops it opening a browser tab.
+  const conhost = path.join(process.env.SystemRoot ?? 'C:\Windows', 'System32', 'conhost.exe');
+  const user = [process.env.USERDOMAIN, process.env.USERNAME || os.userInfo().username].filter(Boolean).join('\\');
+  return `<?xml version="1.0"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>Starts Manga Tracker in the background when you sign in.</Description></RegistrationInfo>
+  <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>${xml(user)}</UserId></LogonTrigger></Triggers>
+  <Principals><Principal id="Author"><UserId>${xml(user)}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <RestartOnFailure><Interval>PT1M</Interval><Count>3</Count></RestartOnFailure>
+    <Enabled>true</Enabled>
+  </Settings>
+  <Actions Context="Author"><Exec>
+    <Command>${xml(conhost)}</Command>
+    <Arguments>--headless "${xml(process.execPath)}" "${xml(__filename)}" --background</Arguments>
+  </Exec></Actions>
+</Task>`;
+}
 function setAutostart(on: boolean) {
   if (process.platform !== 'win32') throw new Error('Starting with the computer is only set up for Windows.');
-  // conhost --headless runs the server with no window; --background stops it opening a browser tab.
-  const conhost = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'conhost.exe');
-  const cmd = `"${conhost}" --headless "${process.execPath}" "${__filename}" --background`;
-  const r = on
-    ? spawnSync('reg', ['add', RUN_KEY, '/v', RUN_NAME, '/t', 'REG_SZ', '/d', cmd, '/f'], { windowsHide: true })
-    : spawnSync('reg', ['delete', RUN_KEY, '/v', RUN_NAME, '/f'], { windowsHide: true });
-  if (r.status !== 0 && on) throw new Error(`Could not set it up: ${String(r.stderr).trim() || 'reg.exe failed'}`);
+  if (on) {
+    const file = path.join(os.tmpdir(), `manga-tracker-task-${process.pid}.xml`);
+    fs.writeFileSync(file, logonTaskXml());
+    const r = spawnSync('schtasks', ['/create', '/tn', TASK_NAME, '/xml', file, '/f'], { windowsHide: true });
+    fs.rmSync(file, { force: true });
+    if (r.status !== 0) throw new Error(`Could not set it up: ${String(r.stderr).trim() || 'schtasks failed'}`);
+  } else {
+    spawnSync('schtasks', ['/delete', '/tn', TASK_NAME, '/f'], { windowsHide: true });
+  }
+  // The older way of starting (a "startup app" entry) is always removed, so it can't start a second copy.
+  spawnSync('reg', ['delete', RUN_KEY, '/v', RUN_NAME, '/f'], { windowsHide: true });
   autostart = on;
   log(`autostart: ${on ? 'on' : 'off'}`);
+}
+/** Setups made before the sign-in task existed are moved over to it once. */
+function upgradeAutostart() {
+  if (process.platform !== 'win32') return;
+  try {
+    if (hasRunEntry() && !hasLogonTask()) setAutostart(true);
+  } catch (err) {
+    log(`error: could not switch to the faster start-up: ${(err as Error).message}`);
+  }
 }
 
 const cfgFile = () => path.join(userData, 'config.json');
@@ -1656,6 +1699,7 @@ function main() {
   process.on('unhandledRejection', (err) => {
     log(`crash: ${(err as Error)?.stack ?? err}`);
   });
+  if (!process.env.MANGA_TRACKER_USERDATA) upgradeAutostart();
   const earlier = errorsFromLastRun();
   if (earlier.length) {
     lastError = `${earlier.length} error${earlier.length === 1 ? '' : 's'} last time the tracker ran. The latest: ${earlier[earlier.length - 1].replace(/^\S+\s+(error|crash): /, '').split('\n')[0].slice(0, 200)} (Settings → Open log for the rest.)`;
