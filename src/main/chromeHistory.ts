@@ -76,9 +76,54 @@ export function listProfiles(): BrowserProfile[] {
  */
 export async function readVisits(historyPath: string, domains: string[], afterId: number): Promise<Visit[]> {
   if (!domains.length) return [];
+  // The copy is taken while the browser may be in the middle of saving, which now and then gives a
+  // copy that can't be read. A moment later it is fine, so try a few times before giving up.
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await readOnce(historyPath, domains, afterId);
+    } catch (err) {
+      if (attempt >= 4 || !/malformed|not a database|EBUSY|EPERM/i.test(String((err as Error).message))) {
+        if (/malformed|not a database/i.test(String((err as Error).message))) {
+          throw new Error('The browser was busy saving its history, so it could not be read just now. It will be tried again in a few minutes.');
+        }
+        throw err;
+      }
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  }
+}
+
+/**
+ * Chromium writes changes into the History file first and keeps the old pages in "History-journal"
+ * until the change is complete. A copy taken in between is half-changed; with the journal next to it,
+ * SQLite puts the old pages back when it opens the copy.
+ */
+function undoHalfWrittenChange(historyPath: string, tmp: string) {
+  const journal = historyPath + '-journal';
+  try {
+    if (!fs.existsSync(journal) || !fs.statSync(journal).size) return;
+    fs.copyFileSync(journal, tmp + '-journal');
+    const sqlite = (process as unknown as { getBuiltinModule?: (id: string) => { DatabaseSync: new (file: string) => { prepare(sql: string): { get(): unknown }; close(): void } } | undefined })
+      .getBuiltinModule?.('node:sqlite');
+    if (!sqlite) return;
+    const db = new sqlite.DatabaseSync(tmp);
+    try {
+      db.prepare('SELECT count(*) FROM sqlite_master').get();
+    } finally {
+      db.close();
+    }
+  } catch {
+    // Not fatal: the copy is read as it is, and the caller tries again if that fails.
+  } finally {
+    fs.rmSync(tmp + '-journal', { force: true });
+  }
+}
+
+async function readOnce(historyPath: string, domains: string[], afterId: number): Promise<Visit[]> {
   const tmp = path.join(os.tmpdir(), `manga-tracker-history-${process.pid}-${Math.random().toString(36).slice(2, 8)}.sqlite`);
   fs.copyFileSync(historyPath, tmp);
   try {
+    if (!isFirefox(historyPath)) undoHalfWrittenChange(historyPath, tmp);
     const SQL = await initSqlJs();
     const bytes = fs.readFileSync(tmp);
     const firefox = isFirefox(historyPath);
